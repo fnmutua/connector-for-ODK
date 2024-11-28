@@ -53,13 +53,24 @@ class ConnectODK:
             
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
-        icon_path = ':/plugins/connect_odk/icon.png'
         
-        self.add_action(icon_path, text=self.tr(u'Get Data'), callback=self.run, parent=self.iface.mainWindow())
+        # First, check if actions already exist and remove them if they do
+        if hasattr(self, 'menu_actions'):
+            # Remove existing actions from the menu
+            for action in self.menu_actions:
+                self.iface.mainWindow().menuBar().removeAction(action)
+        
+        # Now, add the new actions
+        icon_path = ':/plugins/plugin_reloader/reload.png'
+        #icon_path = ':/plugins/connect_odk/icon.png'
+        get_data_action = self.add_action(icon_path, text=self.tr(u'Get Data'), callback=self.run, parent=self.iface.mainWindow())
+        
 
-        # Add the action for "Split Layer"
-        split_layer_icon = ':/plugins/connect_odk/split_layer_icon.png'  # Add your icon path
-        self.add_action(split_layer_icon, text=self.tr(u'Split Layer'), callback=self.open_split_layer_dialog, parent=self.iface.mainWindow())
+        icon_path = ':/plugins/Generalizer3/icon.png'
+        split_layer_action = self.add_action(icon_path, text=self.tr(u'Split Layer'), callback=self.open_split_layer_dialog, parent=self.iface.mainWindow())
+
+        # Store the actions so they can be removed when reloading
+        self.menu_actions = [get_data_action, split_layer_action]
 
 
     def unload(self):
