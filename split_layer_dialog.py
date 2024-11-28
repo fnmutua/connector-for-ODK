@@ -3,15 +3,10 @@ from qgis.core import (
     QgsProject,
     QgsVectorLayer,
     QgsFeatureRequest,
-    QgsVectorFileWriter,
-    QgsField,
     QgsFields,
     QgsFeature,
     QgsWkbTypes,
-    QgsCoordinateReferenceSystem,
-    QgsVectorLayerExporter,
 )
-from qgis.PyQt.QtCore import Qt
 
 class SplitLayerDialog(QDialog):
     def __init__(self):
@@ -28,7 +23,6 @@ class SplitLayerDialog(QDialog):
         # ComboBox to select a layer
         self.layer_combobox = QComboBox()
         self.populate_layers()
-        self.layer_combobox.currentIndexChanged.connect(self.on_layer_selected)
 
         # ComboBox to select an attribute
         self.attribute_combobox = QComboBox()
@@ -46,8 +40,14 @@ class SplitLayerDialog(QDialog):
         
         self.setLayout(layout)
 
-        # Connect the button click to the method that will split the layer
+        # Connect the ComboBox signals to methods
+        self.layer_combobox.currentIndexChanged.connect(self.on_layer_selected)
         self.split_button.clicked.connect(self.split_layer)
+
+        # Automatically select the first project (index 0) and trigger the on_layer_selected method manually
+        if self.layer_combobox.count() > 0:
+            self.layer_combobox.setCurrentIndex(0)
+            self.on_layer_selected()  # Now safe to call
 
     def populate_layers(self):
         """Populate the ComboBox with the available layers in the QGIS project."""
