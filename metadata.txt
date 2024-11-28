@@ -1,21 +1,19 @@
 # This file contains metadata for your plugin.
 
-# This file should be included when you package your plugin.
-# Mandatory items:
+# This file should be included when you package your plugin.# Mandatory items:
 
 [general]
 name=ODK Connect
 qgisMinimumVersion=3.0
-description=Connects to ODK Central to post-process spatial survey data. Allows layer splitting based on a selected attribute
+description= Connect to ODK Central, fetch submissions, and visualize field data on QGIS maps. Supports filtering, spatial analysis, and data export.
 version=0.1
 author=Felix Mutua
 email=mutua@ags.co.ke
 
-about=The plugin connects to ODK Central, retrieves form submissions, extracts spatial data (e.g., GPS coordinates, points, or geometries), and converts them into a valid GeoJSON FeatureCollection. The resulting GeoJSON can be used for mapping, analysis, or integration into GIS platforms. It helps streamline the process of importing spatial data from ODK into QGIS for further analysis and visualization. It also allows splitting of a layer based on unique values in a given attribute.  The Plugin requires requests package
+about= The plugin connects to ODK Central, retrieves form submissions, extracts spatial data (e.g., GPS coordinates, points, or geometries), and converts them into a valid GeoJSON FeatureCollection. The resulting GeoJSON can be used for mapping, analysis, or integration into GIS platforms.
 
-tracker=https://github.com/fnmutua/ODK-Connect.git
-repository=https://github.com/fnmutua/ODK-Connect.git
-
+tracker=http://bugs
+repository=http://repo
 # End of mandatory metadata
 
 # Recommended items:
@@ -25,24 +23,21 @@ hasProcessingProvider=no
 # changelog=
 
 # Tags are comma separated with spaces allowed
-tags=python, ODK, GeoJSON, spatial, QGIS, mapping, survey, integration
+tags=python
 
-homepage=https://github.com/fnmutua/ODK-Connect.git
+homepage=http://homepage
 category=Web
 icon=icon.png
-
-# Experimental flag
+# experimental flag
 experimental=False
 
-# Deprecated flag (applies to the whole plugin, not just a single version)
+# deprecated flag (applies to the whole plugin, not just a single version)
 deprecated=False
 
-# Since QGIS 3.8, a comma-separated list of plugins to be installed
+# Since QGIS 3.8, a comma separated list of plugins to be installed
 # (or upgraded) can be specified.
+# Check the documentation for more information.
 # plugin_dependencies=
-
-# Plugin category: Raster, Vector, Database, or Web
-category=Web
 
 # If the plugin can run on QGIS Server.
 server=False

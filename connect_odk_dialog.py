@@ -16,6 +16,7 @@ class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
 
     def __init__(self, default_url="https://example.co.ke", default_username="user@gmail.com", default_password="password"):
+    
         """Constructor."""
         super().__init__()
 
