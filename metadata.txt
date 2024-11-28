@@ -10,10 +10,10 @@ version=0.1
 author=Felix Mutua
 email=mutua@ags.co.ke
 
-about= The plugin connects to ODK Central, retrieves form submissions, extracts spatial data (e.g., GPS coordinates, points, or geometries), and converts them into a valid GeoJSON FeatureCollection. The resulting GeoJSON can be used for mapping, analysis, or integration into GIS platforms.
+about= The plugin connects to ODK Central, retrieves form submissions, extracts spatial data (e.g., GPS coordinates, points, or geometries), and converts them into a valid vector layer. The resulting GeoJSON can be used for mapping, analysis, or integration into GIS platforms. Additionally, it allows for splitting layers based on select attribute
 
-tracker=http://bugs
-repository=http://repo
+tracker=https://github.com/fnmutua/ODK-Connect
+repository=https://github.com/fnmutua/ODK-Connect
 # End of mandatory metadata
 
 # Recommended items:
