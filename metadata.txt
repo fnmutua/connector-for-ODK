@@ -6,15 +6,15 @@
 [general]
 name=ODK Connect
 qgisMinimumVersion=3.0
-description=Connects to ODK Central to post-process spatial survey data
+description=Connects to ODK Central to post-process spatial survey data. Allows layer splitting based on a selected attribute
 version=0.1
 author=Felix Mutua
 email=mutua@ags.co.ke
 
-about=The plugin connects to ODK Central, retrieves form submissions, extracts spatial data (e.g., GPS coordinates, points, or geometries), and converts them into a valid GeoJSON FeatureCollection. The resulting GeoJSON can be used for mapping, analysis, or integration into GIS platforms. It helps streamline the process of importing spatial data from ODK into QGIS for further analysis and visualization.
+about=The plugin connects to ODK Central, retrieves form submissions, extracts spatial data (e.g., GPS coordinates, points, or geometries), and converts them into a valid GeoJSON FeatureCollection. The resulting GeoJSON can be used for mapping, analysis, or integration into GIS platforms. It helps streamline the process of importing spatial data from ODK into QGIS for further analysis and visualization. It also allows splitting of a layer based on unique values in a given attribute.  The Plugin requires requests package
 
-tracker=http://bugs
-repository=http://repo
+tracker=https://github.com/fnmutua/ODK-Connect.git
+repository=https://github.com/fnmutua/ODK-Connect.git
 
 # End of mandatory metadata
 
@@ -27,7 +27,7 @@ hasProcessingProvider=no
 # Tags are comma separated with spaces allowed
 tags=python, ODK, GeoJSON, spatial, QGIS, mapping, survey, integration
 
-homepage=http://homepage
+homepage=https://github.com/fnmutua/ODK-Connect.git
 category=Web
 icon=icon.png
 
