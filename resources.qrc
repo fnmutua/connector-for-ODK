@@ -1,5 +1,6 @@
 <RCC>
-    <qresource prefix="/plugins/connect_odk" >
-        <file>icon.png</file>
+    <qresource prefix="/plugins/collect_odk" >
+        <file>download.svg</file>
+        <file>split.svg</file>
     </qresource>
 </RCC>

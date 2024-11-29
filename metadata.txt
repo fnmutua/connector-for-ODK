@@ -27,7 +27,7 @@ tags=python
 
 homepage=https://github.com/fnmutua/ODK-Connect
 category=Web
-icon=icon.png
+icon=download.svg
 # experimental flag
 experimental=False
 

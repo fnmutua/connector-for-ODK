@@ -57,7 +57,6 @@ class ConnectODKDialog(QDialog):
         self.form_combobox = QComboBox()
 
         self.login_button = QPushButton("Login")
-        self.login_button.setIcon(QIcon("icon.png"))  # Replace with your icon file path
 
         self.login_button.clicked.connect(self.pre_login)
 
