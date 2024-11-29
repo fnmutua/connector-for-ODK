@@ -11,11 +11,19 @@ import requests
 import json 
 from PyQt5.QtCore import Qt  # Add this import for Qt
 from qgis.core import QgsVectorLayer, QgsField, QgsProject, QgsFeature, QgsGeometry
+from PyQt5.QtCore import QTimer
+
+#------- Showing dialog
+from PyQt5.QtWidgets import QDialog, QProgressBar, QVBoxLayout, QMessageBox, QPushButton
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+import time  # Simulating a delay for data fetching
+
+
 
 class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
 
-    def __init__(self, default_url="https://example.co.ke", default_username="user@gmail.com", default_password="password"):
+    def __init__(self, default_url="https://collector.kesmis.go.ke", default_username="felix.mutua@gmail.com", default_password="Admin@2011"):
     
         """Constructor."""
         super().__init__()
@@ -51,11 +59,11 @@ class ConnectODKDialog(QDialog):
         self.login_button = QPushButton("Login")
         self.login_button.setIcon(QIcon("icon.png"))  # Replace with your icon file path
 
-        self.login_button.clicked.connect(self.login)
+        self.login_button.clicked.connect(self.pre_login)
 
         # Process Form button
         self.process_button = QPushButton("Process Form")
-        self.process_button.clicked.connect(self.process_form)
+        self.process_button.clicked.connect(self.pre_process_form)
         self.process_button.setEnabled(False)  # Disable until a form is selected
 
         # Create the QGIS map canvas
@@ -71,7 +79,7 @@ class ConnectODKDialog(QDialog):
 
         # Add Login button and Process Form button
         layout.addLayout(form_layout)
-    # Create a horizontal layout for the buttons
+       # Create a horizontal layout for the buttons
         button_layout = QHBoxLayout()
 
         # Add buttons to the horizontal layout
@@ -80,12 +88,23 @@ class ConnectODKDialog(QDialog):
 
         # Add the button layout to the main vertical layout
         layout.addLayout(button_layout)
-                # Add map canvas to the layout
-                #layout.addWidget(self.map_canvas)
+        
+
+
+        # Set up the UI components
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, 0)  # Indeterminate mode (no progress shown)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setAlignment(Qt.AlignCenter)
+            
+        layout.addWidget(self.progress_bar)  # Correct way to add widget to layout
+
+
 
         self.setLayout(layout)
 
- 
+        # Initially hide the progress bar
+        self.progress_bar.hide()
 
     def get_form_data(self):
         """Return the form data entered by the user."""
@@ -105,17 +124,26 @@ class ConnectODKDialog(QDialog):
         self.form_combobox.clear()
         self.form_combobox.setEnabled(True)
 
- 
+    def pre_login(self):
+        """start progress bar"""
+        self.progress_bar.show()
+        # Use QTimer to delay the login function by 1 second (1000 milliseconds)
+        QTimer.singleShot(1000, self.login)
+
+
     def login(self):
         """Login to ODK Central and fetch projects and forms."""
         server_url = self.url_edit.text()
         username = self.username_edit.text()
         password = self.password_edit.text()
-
+      
         # Fetch projects
         try:
+            
             projects = self.fetch_projects(server_url, username, password)
             self.projects = projects  # Store the fetched projects
+            # Initially hide the progress bar
+            self.progress_bar.hide()
 
             # Populate the project combobox
             self.set_projects_and_forms(projects)
@@ -128,6 +156,7 @@ class ConnectODKDialog(QDialog):
             self.project_combobox.setCurrentIndex(0)
 
             # Trigger the on_project_selected method manually after setting the index
+            
             self.on_project_selected()
 
             # Connect the signal when a project is selected to fetch forms
@@ -146,6 +175,7 @@ class ConnectODKDialog(QDialog):
     def on_project_selected(self):
         """Fetch forms when a project is selected."""
         selected_project_name = self.project_combobox.currentText()
+
         
         # Find the project ID from the list of projects
         selected_project_id = None
@@ -157,8 +187,16 @@ class ConnectODKDialog(QDialog):
         if selected_project_id:
             try:
                 # Fetch forms for the selected project
+
+                # Show the progress bar immediately
+                #self.progress_bar.show()
+
+                # Use QTimer to delay the login function by 1 second (1000 milliseconds)
+                #forms =  QTimer.singleShot(1000, self.fetch_forms(self.url_edit.text(), self.username_edit.text(), self.password_edit.text(), selected_project_id))
+                 
+                #self.progress_bar.hide()
                 forms = self.fetch_forms(self.url_edit.text(), self.username_edit.text(), self.password_edit.text(), selected_project_id)
-                
+                 
                 # Store the forms in self.forms
                 self.forms = forms  # Store the fetched forms
 
@@ -176,12 +214,14 @@ class ConnectODKDialog(QDialog):
 
     def fetch_projects(self, server_url, username, password):
         """Fetch projects from ODK Central."""
+        
         projects_api_url = f"{server_url}/v1/projects"
         
         try:
             response = requests.get(projects_api_url, auth=(username, password))
             response.raise_for_status()
             projects = response.json()
+            #self.progress_bar.hide()
             return projects
         except requests.exceptions.RequestException as e:
             raise Exception(f"Error fetching projects: {str(e)}")
@@ -210,13 +250,31 @@ class ConnectODKDialog(QDialog):
         
         raise Exception(f"Form ID not found for form: {form_name}")
 
+
+    def pre_process_form(self):
+      """start progress bar"""
+      self.progress_bar.show()
+      # Use QTimer to delay the login function by 1 second (1000 milliseconds)
+      QTimer.singleShot(1000, self.process_form)
+
+    def hide_progress(self):
+      """Hide progress bar"""
+      self.progress_bar.hide()
+ 
+
+
+
     def process_form(self):
         """Process the form, fetch submissions, and convert them to GeoJSON."""
+        
         server_url = self.url_edit.text()
         username = self.username_edit.text()
         password = self.password_edit.text()
         selected_project_name = self.project_combobox.currentText()
         selected_form_name = self.form_combobox.currentText()
+
+        #Show the progress bar
+         
 
         # Find the project ID from the list of projects
         selected_project_id = None
@@ -402,5 +460,7 @@ class ConnectODKDialog(QDialog):
         # Zoom the map canvas to the extent of the layer
         self.map_canvas.setExtent(vector_layer.extent())
         self.map_canvas.refresh()
+        self.hide_progress()
+        
 
         print("GeoJSON data with all properties has been added to the map.")
