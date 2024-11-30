@@ -28,9 +28,8 @@ from qgis.core import QgsMessageLog
 class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
 
-    #def __init__(self, default_url="https://collector.org", default_username="user@gmail.com", default_password="password"):
-    def __init__(self, default_url="https://collector.kesmis.go.ke", default_username="felix.mutua@gmail.com", default_password="Admin@2011"):
-    
+    def __init__(self, default_url="https://collector.org", default_username="user@gmail.com", default_password="password"):
+     
         """Constructor."""
         super().__init__()
 
