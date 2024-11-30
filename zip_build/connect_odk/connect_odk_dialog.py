@@ -1,32 +1,40 @@
 from PyQt5.QtWidgets import QDialog, QComboBox, QLineEdit, QPushButton, QVBoxLayout, QFormLayout, QMessageBox
-from qgis.core import QgsVectorLayer, QgsProject, QgsField
+from qgis.core import QgsVectorLayer, QgsProject
 from qgis.gui import QgsMapCanvas  # Ensure QgsMapCanvas is imported from qgis.gui
-from PyQt5.QtCore import QVariant  # For data types in QGIS layers
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QPushButton, QHBoxLayout
-from PyQt5.QtGui import QIcon
+from PyQt5.QtWidgets import QVBoxLayout, QPushButton, QHBoxLayout
 
 import requests
 
 
 import json 
 from PyQt5.QtCore import Qt  # Add this import for Qt
-from qgis.core import QgsVectorLayer, QgsField, QgsProject, QgsFeature, QgsGeometry
+from qgis.core import QgsVectorLayer, QgsProject
 from PyQt5.QtCore import QTimer
 
 #------- Showing dialog
 from PyQt5.QtWidgets import QDialog, QProgressBar, QVBoxLayout, QMessageBox, QPushButton
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-import time  # Simulating a delay for data fetching
+from PyQt5.QtCore import Qt
 
+import csv
+import json
+from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+from PyQt5.QtCore import QSettings  
+from PyQt5.QtGui import QIcon
+
+ 
+from qgis.core import QgsMessageLog
 
 
 class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
 
-    def __init__(self, default_url="https://collector.org", default_username="user@gmail.com", default_password="password"):
+    #def __init__(self, default_url="https://collector.org", default_username="user@gmail.com", default_password="password"):
+    def __init__(self, default_url="https://collector.kesmis.go.ke", default_username="felix.mutua@gmail.com", default_password="Admin@2011"):
     
         """Constructor."""
         super().__init__()
+
+        self.settings = QSettings("AGS", "ODKConnect")
 
         self.setWindowTitle('ODK Connect Central')
         self.setFixedSize(800, 250)  # Adjusted size for map and form
@@ -34,6 +42,7 @@ class ConnectODKDialog(QDialog):
         # Initialize variables
         self.projects = []
         self.forms = []
+        self.geo_data = []
 
         # Create layout
         layout = QVBoxLayout()
@@ -42,22 +51,32 @@ class ConnectODKDialog(QDialog):
         # Create widgets
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("ODK Central URL")
-        self.url_edit.setText(default_url)  # Set default URL
+        #self.url_edit.setText(default_url)  # Set default URL
+        self.url_edit.setText(self.settings.value("url", default_url))  # Load saved password or default value
 
         self.username_edit = QLineEdit()
         self.username_edit.setPlaceholderText("Username")
-        self.username_edit.setText(default_username)  # Set default username
+        #self.username_edit.setText(default_username)  # Set default username
+        self.username_edit.setText(self.settings.value("username", default_username))  # Load saved username or default value
 
         self.password_edit = QLineEdit()
         self.password_edit.setPlaceholderText("Password")
         self.password_edit.setEchoMode(QLineEdit.Password)
-        self.password_edit.setText(default_password)  # Set default password
+        #self.password_edit.setText(default_password)  # Set default password
+        self.password_edit.setText(self.settings.value("password", default_password))  # Load saved password or default value
+
+        self.save_button = QPushButton("Save Credentials")
+        self.save_button.setIcon(QIcon("icon.png"))  # Optional: Add an icon to the button
+        self.save_button.clicked.connect(self.save_credentials)
+
+
+
+
 
         self.project_combobox = QComboBox()
         self.form_combobox = QComboBox()
 
         self.login_button = QPushButton("Login")
-        self.login_button.setIcon(QIcon("icon.png"))  # Replace with your icon file path
 
         self.login_button.clicked.connect(self.pre_login)
 
@@ -65,6 +84,17 @@ class ConnectODKDialog(QDialog):
         self.process_button = QPushButton("Process Form")
         self.process_button.clicked.connect(self.pre_process_form)
         self.process_button.setEnabled(False)  # Disable until a form is selected
+
+
+
+        # Process Form button
+        self.csv_button = QPushButton("Get CSV")
+        self.csv_button.clicked.connect(self.save_geojson_as_csv)
+        self.csv_button.setEnabled(False)  # Disable until a form is selected
+
+
+
+
 
         # Create the QGIS map canvas
         self.map_canvas = QgsMapCanvas()
@@ -84,7 +114,9 @@ class ConnectODKDialog(QDialog):
 
         # Add buttons to the horizontal layout
         button_layout.addWidget(self.login_button)
+        button_layout.addWidget(self.save_button)
         button_layout.addWidget(self.process_button)
+        button_layout.addWidget(self.csv_button)
 
         # Add the button layout to the main vertical layout
         layout.addLayout(button_layout)
@@ -166,6 +198,7 @@ class ConnectODKDialog(QDialog):
             # Display error message to the user
             error_message = f"Error fetching projects: {str(e)}"
             QMessageBox.critical(self, "Login Error", error_message)
+            self.progress_bar.hide()
 
             # Optionally, you can also raise the exception if you want to propagate it further
             #raise
@@ -187,14 +220,8 @@ class ConnectODKDialog(QDialog):
         if selected_project_id:
             try:
                 # Fetch forms for the selected project
-
-                # Show the progress bar immediately
-                #self.progress_bar.show()
-
-                # Use QTimer to delay the login function by 1 second (1000 milliseconds)
-                #forms =  QTimer.singleShot(1000, self.fetch_forms(self.url_edit.text(), self.username_edit.text(), self.password_edit.text(), selected_project_id))
-                 
-                #self.progress_bar.hide()
+ 
+         
                 forms = self.fetch_forms(self.url_edit.text(), self.username_edit.text(), self.password_edit.text(), selected_project_id)
                  
                 # Store the forms in self.forms
@@ -428,6 +455,7 @@ class ConnectODKDialog(QDialog):
             json.dump(geojson_collection, f, indent=2)
 
         print(f"GeoJSON data saved to {output_file}")
+        self.csv_button.setEnabled(True)
 
         return geojson_collection
 
@@ -449,6 +477,7 @@ class ConnectODKDialog(QDialog):
         # Convert GeoJSON dictionary to JSON string
 
         geojson_data = self.remove_empty_properties(geojson_data)
+        self.geo_data=geojson_data
 
         geojson_str = json.dumps(geojson_data)
         vector_layer = QgsVectorLayer(geojson_str,form_name,"ogr")
@@ -464,3 +493,121 @@ class ConnectODKDialog(QDialog):
         
 
         print("GeoJSON data with all properties has been added to the map.")
+
+    def save_geojson_as_csv(self):
+        """
+        Save GeoJSON data as a CSV file.
+
+        :param self: Reference to the plugin instance.
+        """
+        try:
+            # Ensure GeoJSON data is a dictionary
+            geo = self.geo_data
+            QgsMessageLog.logMessage("Starting the process to save GeoJSON as CSV...", "GeoJSON to CSV")
+
+            if isinstance(geo, str):
+                # If it's a string, try to load it as a GeoJSON
+                try:
+                    geo = json.loads(geo)
+                except json.JSONDecodeError:
+                    QMessageBox.warning(self, "Error", "Invalid GeoJSON string.")
+                    return
+            elif not isinstance(geo, dict):
+                # If it's not a string or a dictionary, raise an error
+                raise ValueError("GeoJSON data must be a dictionary or a valid JSON string.")
+
+            # Check if the GeoJSON has the expected structure
+            if "features" not in geo:
+                QMessageBox.warning(self, "Error", "GeoJSON data is missing 'features' key.")
+                return
+
+            features = geo.get("features", [])
+
+            # Show info message with the number of features found
+            if not features:
+                QMessageBox.warning(self, "Error", "No features found in GeoJSON.")
+                return
+
+            # Inform the user how many features were found
+            #QMessageBox.information(self, "Features Found", f"{len(features)} features found in the GeoJSON.")
+
+            # Prepare CSV headers from feature properties and coordinates (no geometry column)
+            headers = set()
+            for feature in features:
+                if isinstance(feature, dict) and "properties" in feature:
+                    headers.update(feature["properties"].keys())
+                else:
+                    # In case some features do not have proper structure, you can handle it here
+                    continue
+            headers = list(headers) + ["latitude", "longitude"]
+
+            # Prompt user for file location
+            output_file, _ = QFileDialog.getSaveFileName(
+                self, "Save CSV File", "", "CSV Files (*.csv);;All Files (*)"
+            )
+
+            if not output_file:
+                QMessageBox.warning(self, "Cancelled", "No file selected.")
+                return
+
+            if not output_file.endswith(".csv"):
+                output_file += ".csv"
+
+            # Write to CSV
+            with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=headers)
+                writer.writeheader()
+
+                for feature in features:
+                    if isinstance(feature, dict):
+                        row = feature.get("properties", {}).copy()
+
+                        # Check the geometry type
+                        geometry = feature.get("geometry", {})
+                        if geometry:
+                            geometry_type = geometry.get("type", "")
+                            if geometry_type == "Point":
+                                # Extract latitude and longitude for point geometries
+                                coordinates = geometry.get("coordinates", [])
+                                if len(coordinates) >= 2:
+                                    latitude, longitude = coordinates[1], coordinates[0]  # GeoJSON stores [longitude, latitude]
+                                    row["latitude"] = latitude
+                                    row["longitude"] = longitude
+                                else:
+                                    row["latitude"] = None
+                                    row["longitude"] = None
+                            else:
+                                # For non-point geometries, don't add geometry to the CSV
+                                row["latitude"] = None
+                                row["longitude"] = None
+                        else:
+                            row["latitude"] = None
+                            row["longitude"] = None
+
+                        writer.writerow(row)
+
+            QgsMessageLog.logMessage(f"CSV successfully saved to {output_file}", "GeoJSON to CSV")
+            QMessageBox.information(self, "Success", f"CSV saved to {output_file}")
+
+        except Exception as e:
+            QgsMessageLog.logMessage(f"Error occurred: {str(e)}", "GeoJSON to CSV")
+            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+    
+    
+    def save_credentials(self):
+        """Save the entered credentials."""
+        # Get the entered values from the text fields
+        url = self.url_edit.text()
+        username = self.username_edit.text()
+        password = self.password_edit.text()
+
+        # Save them to QSettings
+        self.settings.setValue("url", url)
+        self.settings.setValue("username", username)
+        self.settings.setValue("password", password)
+
+        # Show a confirmation message
+        QMessageBox.information(self, "Success", "Credentials saved successfully!")
+
+        # Optionally, print or log the saved values for debugging (do not do this for passwords in production)
+        print(f"Saved URL: {url}, Username: {username}")

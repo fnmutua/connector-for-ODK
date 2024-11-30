@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import QDialog, QComboBox, QLineEdit, QPushButton, QVBoxLayout, QFormLayout, QMessageBox
-from qgis.core import QgsVectorLayer, QgsProject
+from qgis.core import QgsVectorLayer, QgsProject,QSettings
 from qgis.gui import QgsMapCanvas  # Ensure QgsMapCanvas is imported from qgis.gui
 from PyQt5.QtWidgets import QVBoxLayout, QPushButton, QHBoxLayout
 
@@ -18,12 +18,9 @@ from PyQt5.QtCore import Qt
 import csv
 import json
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
-from PyQt5.QtCore import QSettings  
-from PyQt5.QtGui import QIcon
 
  
 from qgis.core import QgsMessageLog
-
 
 class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
@@ -33,8 +30,6 @@ class ConnectODKDialog(QDialog):
     
         """Constructor."""
         super().__init__()
-
-        self.settings = QSettings("AGS", "ODKConnect")
 
         self.setWindowTitle('ODK Connect Central')
         self.setFixedSize(800, 250)  # Adjusted size for map and form
@@ -51,27 +46,16 @@ class ConnectODKDialog(QDialog):
         # Create widgets
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("ODK Central URL")
-        #self.url_edit.setText(default_url)  # Set default URL
-        self.url_edit.setText(self.settings.value("url", default_url))  # Load saved password or default value
+        self.url_edit.setText(default_url)  # Set default URL
 
         self.username_edit = QLineEdit()
         self.username_edit.setPlaceholderText("Username")
-        #self.username_edit.setText(default_username)  # Set default username
-        self.username_edit.setText(self.settings.value("username", default_username))  # Load saved username or default value
+        self.username_edit.setText(default_username)  # Set default username
 
         self.password_edit = QLineEdit()
         self.password_edit.setPlaceholderText("Password")
         self.password_edit.setEchoMode(QLineEdit.Password)
-        #self.password_edit.setText(default_password)  # Set default password
-        self.password_edit.setText(self.settings.value("password", default_password))  # Load saved password or default value
-
-        self.save_button = QPushButton("Save Credentials")
-        self.save_button.setIcon(QIcon("icon.png"))  # Optional: Add an icon to the button
-        self.save_button.clicked.connect(self.save_credentials)
-
-
-
-
+        self.password_edit.setText(default_password)  # Set default password
 
         self.project_combobox = QComboBox()
         self.form_combobox = QComboBox()
@@ -90,7 +74,7 @@ class ConnectODKDialog(QDialog):
         # Process Form button
         self.csv_button = QPushButton("Get CSV")
         self.csv_button.clicked.connect(self.save_geojson_as_csv)
-        self.csv_button.setEnabled(False)  # Disable until a form is selected
+        #self.csv_button.setEnabled(False)  # Disable until a form is selected
 
 
 
@@ -114,7 +98,6 @@ class ConnectODKDialog(QDialog):
 
         # Add buttons to the horizontal layout
         button_layout.addWidget(self.login_button)
-        button_layout.addWidget(self.save_button)
         button_layout.addWidget(self.process_button)
         button_layout.addWidget(self.csv_button)
 
@@ -198,7 +181,6 @@ class ConnectODKDialog(QDialog):
             # Display error message to the user
             error_message = f"Error fetching projects: {str(e)}"
             QMessageBox.critical(self, "Login Error", error_message)
-            self.progress_bar.hide()
 
             # Optionally, you can also raise the exception if you want to propagate it further
             #raise
@@ -455,7 +437,6 @@ class ConnectODKDialog(QDialog):
             json.dump(geojson_collection, f, indent=2)
 
         print(f"GeoJSON data saved to {output_file}")
-        self.csv_button.setEnabled(True)
 
         return geojson_collection
 
@@ -592,22 +573,3 @@ class ConnectODKDialog(QDialog):
         except Exception as e:
             QgsMessageLog.logMessage(f"Error occurred: {str(e)}", "GeoJSON to CSV")
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
-    
-    
-    def save_credentials(self):
-        """Save the entered credentials."""
-        # Get the entered values from the text fields
-        url = self.url_edit.text()
-        username = self.username_edit.text()
-        password = self.password_edit.text()
-
-        # Save them to QSettings
-        self.settings.setValue("url", url)
-        self.settings.setValue("username", username)
-        self.settings.setValue("password", password)
-
-        # Show a confirmation message
-        QMessageBox.information(self, "Success", "Credentials saved successfully!")
-
-        # Optionally, print or log the saved values for debugging (do not do this for passwords in production)
-        print(f"Saved URL: {url}, Username: {username}")

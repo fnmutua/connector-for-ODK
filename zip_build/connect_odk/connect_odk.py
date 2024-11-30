@@ -5,6 +5,7 @@ from .connect_odk_dialog import ConnectODKDialog
 import requests
 import os
 from .split_layer_dialog import SplitLayerDialog  # Import the new SplitLayerDialog
+from .resources import *
 
 
 class ConnectODK:
@@ -61,12 +62,12 @@ class ConnectODK:
                 self.iface.mainWindow().menuBar().removeAction(action)
         
         # Now, add the new actions
-        icon_path = ':/plugins/plugin_reloader/reload.png'
+        icon_path = ':/plugins/collect_odk/download.svg'
         #icon_path = ':/plugins/connect_odk/icon.png'
         get_data_action = self.add_action(icon_path, text=self.tr(u'Get Data'), callback=self.run, parent=self.iface.mainWindow())
         
 
-        icon_path = ':/plugins/Generalizer3/icon.png'
+        icon_path = ':/plugins/collect_odk/split.svg'
         split_layer_action = self.add_action(icon_path, text=self.tr(u'Split Layer'), callback=self.open_split_layer_dialog, parent=self.iface.mainWindow())
 
         # Store the actions so they can be removed when reloading
