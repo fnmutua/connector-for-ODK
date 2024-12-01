@@ -23,6 +23,7 @@ from PyQt5.QtGui import QIcon
 
  
 from qgis.core import QgsMessageLog
+from collections import OrderedDict
 
 
 class ConnectODKDialog(QDialog):
@@ -493,6 +494,23 @@ class ConnectODKDialog(QDialog):
 
         print("GeoJSON data with all properties has been added to the map.")
 
+ 
+    def extract_headers_from_geojson(self,features):
+        """
+        Extract all unique property keys from GeoJSON features in the order they are encountered.
+
+        :param features: List of GeoJSON features.
+        :return: List of unique headers including geometry fields.
+        """
+        headers = OrderedDict()  # Use OrderedDict to preserve order
+        for feature in features:
+            if isinstance(feature, dict) and "properties" in feature:
+                for key in feature["properties"].keys():
+                    headers[key] = None  # Add keys in order of their first appearance
+
+        # Add geometry fields to the headers
+        return list(headers.keys()) + ["latitude", "longitude"]
+
     def save_geojson_as_csv(self):
         """
         Save GeoJSON data as a CSV file.
@@ -505,50 +523,33 @@ class ConnectODKDialog(QDialog):
             QgsMessageLog.logMessage("Starting the process to save GeoJSON as CSV...", "GeoJSON to CSV")
 
             if isinstance(geo, str):
-                # If it's a string, try to load it as a GeoJSON
                 try:
                     geo = json.loads(geo)
                 except json.JSONDecodeError:
                     QMessageBox.warning(self, "Error", "Invalid GeoJSON string.")
                     return
             elif not isinstance(geo, dict):
-                # If it's not a string or a dictionary, raise an error
                 raise ValueError("GeoJSON data must be a dictionary or a valid JSON string.")
 
-            # Check if the GeoJSON has the expected structure
             if "features" not in geo:
                 QMessageBox.warning(self, "Error", "GeoJSON data is missing 'features' key.")
                 return
 
             features = geo.get("features", [])
-
-            # Show info message with the number of features found
             if not features:
                 QMessageBox.warning(self, "Error", "No features found in GeoJSON.")
                 return
 
-            # Inform the user how many features were found
-            #QMessageBox.information(self, "Features Found", f"{len(features)} features found in the GeoJSON.")
-
-            # Prepare CSV headers from feature properties and coordinates (no geometry column)
-            headers = set()
-            for feature in features:
-                if isinstance(feature, dict) and "properties" in feature:
-                    headers.update(feature["properties"].keys())
-                else:
-                    # In case some features do not have proper structure, you can handle it here
-                    continue
-            headers = list(headers) + ["latitude", "longitude"]
+            # Extract headers in order
+            headers = self.extract_headers_from_geojson(features)
 
             # Prompt user for file location
             output_file, _ = QFileDialog.getSaveFileName(
                 self, "Save CSV File", "", "CSV Files (*.csv);;All Files (*)"
             )
-
             if not output_file:
                 QMessageBox.warning(self, "Cancelled", "No file selected.")
                 return
-
             if not output_file.endswith(".csv"):
                 output_file += ".csv"
 
@@ -561,22 +562,14 @@ class ConnectODKDialog(QDialog):
                     if isinstance(feature, dict):
                         row = feature.get("properties", {}).copy()
 
-                        # Check the geometry type
+                        # Add geometry fields for point geometries
                         geometry = feature.get("geometry", {})
-                        if geometry:
-                            geometry_type = geometry.get("type", "")
-                            if geometry_type == "Point":
-                                # Extract latitude and longitude for point geometries
-                                coordinates = geometry.get("coordinates", [])
-                                if len(coordinates) >= 2:
-                                    latitude, longitude = coordinates[1], coordinates[0]  # GeoJSON stores [longitude, latitude]
-                                    row["latitude"] = latitude
-                                    row["longitude"] = longitude
-                                else:
-                                    row["latitude"] = None
-                                    row["longitude"] = None
+                        if geometry and geometry.get("type", "") == "Point":
+                            coordinates = geometry.get("coordinates", [])
+                            if len(coordinates) >= 2:
+                                row["latitude"] = coordinates[1]
+                                row["longitude"] = coordinates[0]
                             else:
-                                # For non-point geometries, don't add geometry to the CSV
                                 row["latitude"] = None
                                 row["longitude"] = None
                         else:
@@ -591,8 +584,7 @@ class ConnectODKDialog(QDialog):
         except Exception as e:
             QgsMessageLog.logMessage(f"Error occurred: {str(e)}", "GeoJSON to CSV")
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
-    
-    
+
     def save_credentials(self):
         """Save the entered credentials."""
         # Get the entered values from the text fields
