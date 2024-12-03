@@ -70,9 +70,6 @@ class ConnectODKDialog(QDialog):
         self.save_button.clicked.connect(self.save_credentials)
 
 
-
-
-
         self.project_combobox = QComboBox()
         self.form_combobox = QComboBox()
 
@@ -85,16 +82,10 @@ class ConnectODKDialog(QDialog):
         self.process_button.clicked.connect(self.pre_process_form)
         self.process_button.setEnabled(False)  # Disable until a form is selected
 
-
-
         # Process Form button
         self.csv_button = QPushButton("Get CSV")
         self.csv_button.clicked.connect(self.save_geojson_as_csv)
         self.csv_button.setEnabled(False)  # Disable until a form is selected
-
-
-
-
 
         # Create the QGIS map canvas
         self.map_canvas = QgsMapCanvas()
@@ -469,7 +460,7 @@ class ConnectODKDialog(QDialog):
         return geojson_data
  
  
-    def add_geojson_to_map(self, geojson_data,form_name):
+    def xadd_geojson_to_map(self, geojson_data,form_name):
         """Add GeoJSON data as a layer to the map, including all properties."""
         
         # Create an empty memory layer for the GeoJSON data with a specific CRS (e.g., EPSG:4326)
@@ -493,6 +484,54 @@ class ConnectODKDialog(QDialog):
         
 
         print("GeoJSON data with all properties has been added to the map.")
+
+    def add_geojson_to_map(self, geojson_data, form_name):
+        """Add GeoJSON data as separate layers to the map based on geometry type."""
+        
+        # Remove empty properties
+        geojson_data = self.remove_empty_properties(geojson_data)
+        self.geo_data = geojson_data
+
+        # Split features by geometry type
+        geometry_types = {
+            "Point": [],
+            "Linear": [],
+            "Polygon": [],
+            # Add additional geometry types if needed
+        }
+
+        # Separate features by geometry type
+        for feature in geojson_data.get("features", []):
+            geometry_type = feature["geometry"]["type"]
+            if geometry_type == "LineString":
+                geometry_types["Linear"].append(feature)
+            elif geometry_type in geometry_types:
+                geometry_types[geometry_type].append(feature)
+        
+        # Create layers for each geometry type
+        for geom_type, features in geometry_types.items():
+            if not features:
+                continue  # Skip if no features for this geometry type
+            
+            # Create a GeoJSON string for this geometry type
+            geom_geojson_data = {
+                "type": "FeatureCollection",
+                "features": features
+            }
+            geom_geojson_str = json.dumps(geom_geojson_data)
+            
+            # Create a layer for this geometry type
+            vector_layer = QgsVectorLayer(geom_geojson_str, f"{form_name}_{geom_type}", "ogr")
+            
+            # Add the vector layer to the current map project
+            QgsProject.instance().addMapLayer(vector_layer)
+        
+        # Optionally zoom to the extent of all added layers
+        self.map_canvas.zoomToFullExtent()
+        self.map_canvas.refresh()
+        self.hide_progress()
+
+        print("GeoJSON data has been added to the map with separate layers for each geometry type.")
 
  
     def extract_headers_from_geojson(self,features):
