@@ -24,10 +24,36 @@ from PyQt5.QtGui import QIcon
  
 from qgis.core import QgsMessageLog
 from collections import OrderedDict
-
+from PyQt5.QtCore import QRegularExpression
+from PyQt5.QtGui import QRegularExpressionValidator
 
 class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
+
+
+
+   
+
+    # Add a validation method
+    def validate_url(self):
+        url = self.url_edit.text().strip()  # Remove leading/trailing spaces
+        if not url.startswith("http://") and not url.startswith("https://"):
+            QMessageBox.warning(self, "Invalid URL", "Please enter a valid URL (must start with http:// or https://).")
+            return False
+        return True
+    
+
+    def pre_login_with_validation(self):
+        if not self.validate_url():
+            return  # Exit if the URL is invalid
+        self.pre_login()  # Proceed with the original login logic
+
+    def strip_spaces(self):
+        """Strip leading and trailing spaces on typing."""
+        current_text = self.sender().text().strip()  # Get the text and strip spaces
+        current_text = current_text.rstrip('/')  # Remove any trailing slashes
+        self.sender().setText(current_text)  # Set the stripped text back
+
 
     def __init__(self, default_url="https://collector.org", default_username="user@gmail.com", default_password="password"):
      
@@ -51,8 +77,18 @@ class ConnectODKDialog(QDialog):
         # Create widgets
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("ODK Central URL")
-        #self.url_edit.setText(default_url)  # Set default URL
-        self.url_edit.setText(self.settings.value("url", default_url))  # Load saved password or default value
+    #     #self.url_edit.setText(default_url)  # Set default URL
+    #     # self.url_edit.setText(self.settings.value("url", default_url))  # Load saved password or default value
+    #     # saved_url = self.settings.value("url", default_url).strip()  # Trim any saved value
+
+    #    # Load saved URL or use default
+    #     saved_url = self.settings.value("url", default_url).strip()  # Trim any saved value
+    #     self.url_edit.setText(saved_url)  # Set the trimmed saved value
+        
+ 
+        self.url_edit.setText(self.settings.value("url", default_url).strip())  # Load saved URL or use default
+        self.url_edit.textChanged.connect(self.strip_spaces)  # Connect to strip spaces method
+
 
         self.username_edit = QLineEdit()
         self.username_edit.setPlaceholderText("Username")
@@ -75,7 +111,7 @@ class ConnectODKDialog(QDialog):
 
         self.login_button = QPushButton("Login")
 
-        self.login_button.clicked.connect(self.pre_login)
+        self.login_button.clicked.connect(self.pre_login_with_validation)
 
         # Process Form button
         self.process_button = QPushButton("Process Form")
