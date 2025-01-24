@@ -27,6 +27,11 @@ from collections import OrderedDict
 from PyQt5.QtCore import QRegularExpression
 from PyQt5.QtGui import QRegularExpressionValidator
 
+from PyQt5.QtWidgets import QLabel
+from PyQt5.QtGui import QPixmap
+
+
+
 class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
 
@@ -157,8 +162,41 @@ class ConnectODKDialog(QDialog):
         self.progress_bar.setAlignment(Qt.AlignCenter)
             
         layout.addWidget(self.progress_bar)  # Correct way to add widget to layout
+        # Create the QLabel for credits
 
 
+
+       # Create a QLabel for the logo
+        logo_label = QLabel()
+        pixmap = QPixmap(':/plugins/collect_odk/logo.svg')  # Replace with the actual path to your logo file
+        if not pixmap.isNull():  # Ensure the logo file is loaded correctly
+            pixmap = pixmap.scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # Scale logo
+        logo_label.setPixmap(pixmap)
+        logo_label.setAlignment(Qt.AlignCenter)
+
+        credit_label = QLabel('<a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">Powered by ODK</a>')
+
+        credit_label.setText('''
+                <div style="text-align: center;">
+                    <a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">Powered by ODK</a>
+                </div>
+            ''')
+        
+        credit_label.setAlignment(Qt.AlignCenter)
+        credit_label.setOpenExternalLinks(True)  # Allow hyperlink to open in browser
+
+        disclaimer_label = QLabel('''
+            <div style="text-align: center; font-size: 10px; color: gray;">
+                <strong>Disclaimer:</strong> This plugin, is not created, endorsed, or affiliated with ODK or its developers. For official resources, visit <a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">getodk.org</a>.
+            </div>
+        ''')
+        disclaimer_label.setOpenExternalLinks(True)
+
+
+        # Add the QLabel to the layout
+        layout.addWidget(logo_label)
+        layout.addWidget(credit_label)
+        layout.addWidget(disclaimer_label)
 
         self.setLayout(layout)
 

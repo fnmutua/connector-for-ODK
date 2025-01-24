@@ -2,5 +2,6 @@
     <qresource prefix="/plugins/collect_odk" >
         <file>download.svg</file>
         <file>split.svg</file>
+        <file>logo.svg</file>
     </qresource>
 </RCC>

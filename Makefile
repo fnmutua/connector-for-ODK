@@ -48,7 +48,7 @@ PY_FILES = \
 
 UI_FILES = connect_odk_dialog_base.ui
 
-EXTRAS = metadata.txt download.svg split.svg
+EXTRAS = metadata.txt download.svg split.svg logo.svg logo.png
 
 EXTRA_DIRS =
 
