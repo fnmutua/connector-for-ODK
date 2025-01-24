@@ -67,7 +67,7 @@ class ConnectODKDialog(QDialog):
 
         self.settings = QSettings("AGS", "ODKConnect")
 
-        self.setWindowTitle('ODK Connect Central')
+        self.setWindowTitle('Connector for ODK')
         self.setFixedSize(800, 250)  # Adjusted size for map and form
 
         # Initialize variables
@@ -194,7 +194,7 @@ class ConnectODKDialog(QDialog):
 
 
         # Add the QLabel to the layout
-        layout.addWidget(logo_label)
+        # layout.addWidget(logo_label)
         layout.addWidget(credit_label)
         layout.addWidget(disclaimer_label)
 

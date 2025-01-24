@@ -40,7 +40,7 @@ class ConnectODK:
             self.iface.addToolBarIcon(action)
 
         if add_to_menu:
-            self.iface.addPluginToMenu(self.tr(u'&ODK Connect'), action)
+            self.iface.addPluginToMenu(self.tr(u'&Connector for ODK'), action)
             
 
         self.actions.append(action)  # Add action to self.actions list

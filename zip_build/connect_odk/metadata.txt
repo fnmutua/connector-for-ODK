@@ -3,7 +3,7 @@
 # This file should be included when you package your plugin.# Mandatory items:
 
 [general]
-name=ODK Connect
+name=Connector for ODK
 qgisMinimumVersion=3.0
 description= Connect to ODK Central, fetch submissions, and visualize field data on QGIS maps. Supports filtering, spatial analysis, and data export.
 version=1.3
