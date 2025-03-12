@@ -8,6 +8,10 @@ from .split_layer_dialog import SplitLayerDialog  # Import the new SplitLayerDia
 from .resources import *
 
 
+from .qaqc import ProcessGDBDialog  # Import the new SplitLayerDialog
+
+
+
 class ConnectODK:
     """QGIS Plugin Implementation."""
 
@@ -51,7 +55,15 @@ class ConnectODK:
             """Open the Split Layer dialog."""
             dialog = SplitLayerDialog()  # Create the SplitLayerDialog
             dialog.exec_()  # Open the dialog
-            
+
+    def open_qaqc_dialog(self):
+            """Open the QA/QC dialog."""
+            dialog = ProcessGDBDialog()  # Create the ProcessGDBDialog
+            dialog.exec_()  # Open the dialog
+
+
+
+
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
         
@@ -62,16 +74,21 @@ class ConnectODK:
                 self.iface.mainWindow().menuBar().removeAction(action)
         
         # Now, add the new actions
-        icon_path = ':/plugins/collect_odk/download.svg'
+        icon_path = ':/plugins/connect_odk/download.svg'
         #icon_path = ':/plugins/connect_odk/icon.png'
         get_data_action = self.add_action(icon_path, text=self.tr(u'Get Data'), callback=self.run, parent=self.iface.mainWindow())
         
 
-        icon_path = ':/plugins/collect_odk/split.svg'
+        icon_path = ':/plugins/connect_odk/split.svg'
         split_layer_action = self.add_action(icon_path, text=self.tr(u'Split Layer'), callback=self.open_split_layer_dialog, parent=self.iface.mainWindow())
 
+        icon_path = ':/plugins/connect_odk/qaqc.svg'
+        qq_qc_action = self.add_action(icon_path, text=self.tr(u'QA/QC'), callback=self.open_qaqc_dialog, parent=self.iface.mainWindow())
+
+
+
         # Store the actions so they can be removed when reloading
-        self.menu_actions = [get_data_action, split_layer_action]
+        self.menu_actions = [get_data_action, split_layer_action,qq_qc_action]
 
 
     def unload(self):

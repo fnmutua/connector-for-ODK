@@ -34,10 +34,7 @@ from PyQt5.QtGui import QPixmap
 
 class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
-
-
-
-   
+ 
 
     # Add a validation method
     def validate_url(self):
@@ -113,7 +110,8 @@ class ConnectODKDialog(QDialog):
 
         self.project_combobox = QComboBox()
         self.form_combobox = QComboBox()
-
+        
+        self.filter_combobox = QComboBox()
         self.login_button = QPushButton("Login")
 
         self.login_button.clicked.connect(self.pre_login_with_validation)
@@ -168,7 +166,7 @@ class ConnectODKDialog(QDialog):
 
        # Create a QLabel for the logo
         logo_label = QLabel()
-        pixmap = QPixmap(':/plugins/collect_odk/logo.svg')  # Replace with the actual path to your logo file
+        pixmap = QPixmap(':/plugins/connect_odk/logo.svg')  # Replace with the actual path to your logo file
         if not pixmap.isNull():  # Ensure the logo file is loaded correctly
             pixmap = pixmap.scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # Scale logo
         logo_label.setPixmap(pixmap)
@@ -533,31 +531,6 @@ class ConnectODKDialog(QDialog):
             feature['properties'] = {key: value for key, value in feature['properties'].items() if value not in [None, '', [], {}, {}, False]}
         return geojson_data
  
- 
-    def xadd_geojson_to_map(self, geojson_data,form_name):
-        """Add GeoJSON data as a layer to the map, including all properties."""
-        
-        # Create an empty memory layer for the GeoJSON data with a specific CRS (e.g., EPSG:4326)
-        #vector_layer = QgsVectorLayer("Point?crs=EPSG:4326", "GeoJSON Layer", "memory")
-        # Convert GeoJSON dictionary to JSON string
-
-        geojson_data = self.remove_empty_properties(geojson_data)
-        self.geo_data=geojson_data
-
-        geojson_str = json.dumps(geojson_data)
-        vector_layer = QgsVectorLayer(geojson_str,form_name,"ogr")
- 
-  
-        # Add the vector layer to the current map project
-        QgsProject.instance().addMapLayer(vector_layer)
-
-        # Zoom the map canvas to the extent of the layer
-        self.map_canvas.setExtent(vector_layer.extent())
-        self.map_canvas.refresh()
-        self.hide_progress()
-        
-
-        print("GeoJSON data with all properties has been added to the map.")
 
     def add_geojson_to_map(self, geojson_data, form_name):
         """Add GeoJSON data as separate layers to the map based on geometry type."""
