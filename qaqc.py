@@ -418,7 +418,7 @@ class ProcessGDBDialog(QDialog):
             return gdf.iloc[list(issue_indices)], issue_details
         return None, None
 
-    def check_sharp_turns_self_intersections(self,gdf, lower_angle_threshold=1, upper_angle_threshold=30):
+    def check_sharp_turns_self_intersections(self,gdf, lower_angle_threshold=15, upper_angle_threshold=30):
         """Find sharp turns and self-intersections in line features.
         
         Args:
@@ -431,8 +431,8 @@ class ProcessGDBDialog(QDialog):
             - A GeoDataFrame with features that have issues.
             - A list of tuples with details about the issues (index, issue type, inner angle, x, y).
         """
-        #gdf = gdf.copy()
-        gdf = self.validate_geodataframe(gdf)
+        gdf = gdf.copy()
+        #gdf = self.validate_geodataframe(gdf)
         issue_indices = set()
         issue_details = []
         lower_angle_threshold = self.min_angle_spinbox.value()
