@@ -90,7 +90,7 @@ class ProcessGDBDialog(QDialog):
         self.min_angle_spinbox = QSpinBox()
         self.min_angle_spinbox.setRange(0, 360)
         self.min_angle_spinbox.setPrefix("Min Angle: ")
-        self.min_angle_spinbox.setValue(20)  # Default value for max angle
+        self.min_angle_spinbox.setValue(1)  # Default value for max angle
 
         self.max_angle_spinbox = QSpinBox()
         self.max_angle_spinbox.setRange(0, 360)
@@ -340,8 +340,9 @@ class ProcessGDBDialog(QDialog):
         
         return None, None
 
+ 
 
-    def check_sharp_turns_self_intersections(self,gdf, lower_angle_threshold=15, upper_angle_threshold=30):
+    def _check_sharp_turns_self_intersections(self, gdf, lower_angle_threshold=15, upper_angle_threshold=30):
         """Find sharp turns and self-intersections in line features.
         
         Args:
@@ -358,8 +359,8 @@ class ProcessGDBDialog(QDialog):
         issue_indices = set()
         issue_details = []
 
-        lower_angle_threshold=self.min_angle_spinbox.value()
-        upper_angle_threshold=self.max_angle_spinbox.value()
+        lower_angle_threshold = self.min_angle_spinbox.value()
+        upper_angle_threshold = self.max_angle_spinbox.value()
 
         # Define the projection transformers
         wgs84 = pyproj.CRS('EPSG:4326')  # WGS84 coordinate system
@@ -381,23 +382,32 @@ class ProcessGDBDialog(QDialog):
 
                 # Check for sharp turns
                 for i in range(1, len(coords) - 1):
-                    v1 = coords[i] - coords[i - 1]
-                    v2 = coords[i + 1] - coords[i]
+                    # Get three consecutive points
+                    p1, p2, p3 = coords[i - 1], coords[i], coords[i + 1]
+                    
+                    # Vectors forming the angle
+                    v1 = p2 - p1  # Vector from p1 to p2
+                    v2 = p3 - p2  # Vector from p2 to p3
 
-                    norm_v1 = np.linalg.norm(v1)
-                    norm_v2 = np.linalg.norm(v2)
+                    # Compute the dot product and cross product
+                    dot_product = np.dot(v1, v2)
+                    cross_product = np.cross(v1, v2)
 
-                    if norm_v1 > 0 and norm_v2 > 0:
-                        dot_product = np.dot(v1, v2)
-                        angle = np.degrees(np.arccos(dot_product / (norm_v1 * norm_v2)))
-                        
-                        # Check if the angle is outside the acceptable range
-                        if lower_angle_threshold <= angle <= upper_angle_threshold:
-                            issue_indices.add(idx)
-                            # Transform the coordinates to WGS84
-                            print(angle)
-                            lon, lat = transformer.transform(coords[i][0], coords[i][1])
-                            issue_details.append((idx, "Angle Out of Range", round(angle, 2), lat, lon))
+                    # Compute the turning angle (in radians)
+                    angle_radians = np.arctan2(np.abs(cross_product), dot_product)
+                    
+                    # Convert to degrees
+                    angle_degrees = np.degrees(angle_radians)
+                    
+                    # Compute the inner angle (180 - turning angle)
+                    inner_angle = 180 - angle_degrees
+
+                    # Check if the inner angle is outside the acceptable range
+                    if lower_angle_threshold <= inner_angle <= upper_angle_threshold:
+                        issue_indices.add(idx)
+                        # Transform the coordinates to WGS84
+                        lon, lat = transformer.transform(p2[0], p2[1])
+                        issue_details.append((idx, "Sharp Turn", round(inner_angle, 2), lat, lon))
 
                 # Check for self-intersections
                 if not line.is_simple:
@@ -407,40 +417,129 @@ class ProcessGDBDialog(QDialog):
         if issue_indices:
             return gdf.iloc[list(issue_indices)], issue_details
         return None, None
-    def check_short_linear_features(self,gdf ):
+
+    def check_sharp_turns_self_intersections(self,gdf, lower_angle_threshold=1, upper_angle_threshold=30):
+        """Find sharp turns and self-intersections in line features.
+        
+        Args:
+            gdf: GeoDataFrame containing line geometries.
+            lower_angle_threshold: Minimum acceptable inner angle (in degrees).
+            upper_angle_threshold: Maximum acceptable inner angle (in degrees).
+        
+        Returns:
+            A tuple containing:
+            - A GeoDataFrame with features that have issues.
+            - A list of tuples with details about the issues (index, issue type, inner angle, x, y).
+        """
+        #gdf = gdf.copy()
+        gdf = self.validate_geodataframe(gdf)
+        issue_indices = set()
+        issue_details = []
+        lower_angle_threshold = self.min_angle_spinbox.value()
+        upper_angle_threshold = self.max_angle_spinbox.value()
+
+        for idx, geom in enumerate(gdf.geometry):
+            if geom is None:
+                continue  # Skip empty geometries
+            
+            # Convert MultiLineString into individual LineStrings
+            lines = [geom] if isinstance(geom, LineString) else list(geom.geoms) if isinstance(geom, MultiLineString) else []
+            
+            for line in lines:
+                if len(line.coords) < 3:
+                    continue  # Skip lines that are too short for angle calculation
+                
+                coords = np.array(line.coords)
+
+                # Check for sharp turns
+                for i in range(1, len(coords) - 1):
+                    # Get three consecutive points
+                    p1, p2, p3 = coords[i - 1], coords[i], coords[i + 1]
+                    
+                    # Vectors forming the angle
+                    v1 = p1 - p2  # Vector from p2 to p1
+                    v2 = p3 - p2  # Vector from p2 to p3
+
+                    # Compute the dot product and cross product
+                    dot_product = np.dot(v1, v2)
+                    cross_product = np.linalg.norm(np.cross(v1, v2))  # Ensure cross product is a scalar
+
+                    # Compute the turning angle (in radians)
+                    angle_radians = np.arctan2(cross_product, dot_product)
+                    
+                    # Convert to degrees
+                    angle_degrees = np.degrees(angle_radians)
+                    
+    
+
+                    # Flag if the inner angle is too sharp
+                    if lower_angle_threshold <= angle_degrees <= upper_angle_threshold:
+                        issue_indices.add(idx)
+                        issue_details.append((idx, "Sharp Turn", round(angle_degrees, 2), p2[0], p2[1]))  # Coordinates in original CRS
+
+                # Check for self-intersections
+                # Check for self-intersections
+                if not line.is_simple:
+                    # Compute self-intersections
+                    intersections = line.intersection(line)
+                    if intersections.geom_type == "Point":  # Single intersection
+                        issue_indices.add(idx)
+                        issue_details.append((idx, "Self-Intersection", None, intersections.x, intersections.y))
+                    elif intersections.geom_type == "MultiPoint":  # Multiple intersections
+                        for pt in intersections.geoms:
+                            issue_indices.add(idx)
+                            issue_details.append((idx, "Self-Intersection", None, pt.x, pt.y))
+
+
+        if issue_indices:
+            return gdf.iloc[list(issue_indices)], issue_details
+        return None, None
+
+
+    def check_short_linear_features(self, gdf):
         """
         Identify linear features shorter than the specified length threshold.
         
         Args:
             gdf (GeoDataFrame): The input GeoDataFrame.
-            length_threshold (float): The minimum length threshold in meters (default: 10).
         
         Returns:
             GeoDataFrame: A GeoDataFrame containing features shorter than the threshold.
             list: A list of tuples containing (feature_id, length) for short features.
         """
-        gdf = self.validate_geodataframe(gdf)
-        length_threshold=self.min_length_spinbox.value()
-        
-        # Reproject to EPSG:21037 (Arc 1960 / UTM zone 37N) for accurate length calculation
-        if gdf.crs != "EPSG:21037":
-            print("Reprojecting to EPSG:21037 (Arc 1960 / UTM zone 37N) for accurate length calculation...")
-            gdf = gdf.to_crs(epsg=21037)  # Ensure length calculations are in meters
-        
-        short_features = []
+        try:
+            gdf = self.validate_geodataframe(gdf)  # Ensure valid GeoDataFrame
+            length_threshold = self.min_length_spinbox.value()
 
-        for idx, geom in enumerate(gdf.geometry):
-            #print(gdf.geom_type)
-            if isinstance(geom, (LineString,MultiLineString)):
-                length = geom.length  # Length in meters
-                #print(length)
-                if length < length_threshold:
-                    short_features.append((gdf.iloc[idx]["feature_id"], length))
-        
-        if short_features:
-            short_indices = [idx for idx, _ in short_features]
-            return gdf.iloc[short_indices], short_features
+            # Reproject to EPSG:21037 for accurate length calculation
+            if gdf.crs != "EPSG:21037":
+                try:
+                    print("Reprojecting to EPSG:21037 (Arc 1960 / UTM zone 37N) for accurate length calculation...")
+                    gdf = gdf.to_crs(epsg=21037)
+                except Exception as e:
+                    print(f"Error during CRS conversion: {e}")
+                    return None, None
+
+            short_features = []
+
+            for idx, geom in gdf.geometry.items():
+                try:
+                    if isinstance(geom, (LineString, MultiLineString)):
+                        length = geom.length  # Length in meters
+                        if length < length_threshold:
+                            short_features.append((gdf.iloc[idx]["feature_id"], length))
+                except Exception as e:
+                    print(f"Error processing geometry at index {idx}: {e}")
+
+            if short_features:
+                short_indices = [idx for idx, _ in short_features]
+                return gdf.iloc[short_indices], short_features
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
         return None, None
+
 
     def generate_summary_pdf(self, output_dir, layer_summary, total_layers, total_features):
         """Generate a PDF summary report for the database with a table format."""
@@ -500,159 +599,6 @@ class ProcessGDBDialog(QDialog):
         self.folder_link_label.setText(f"<a href='file:///{output_dir}'>Open Output Folder</a>")
         self.folder_link_label.show()  # Show the folder link
         
-    
-    def xrun_all_checks(self):
-        """Run all checks sequentially."""
-        """Process all layers in the geodatabase and save rows with issues and detailed Excel reports."""
-        os.makedirs(self.output_folder, exist_ok=True)
-        layer_summary = {}
-        total_features = 0
-        self.progress_bar.show()
-
-        with fiona.Env():
-            layers = fiona.listlayers(self.gdb_path)
-            total_layers = len(layers)
-            self.log_message(f"Total Number of layers: {total_layers}")  # Log to QTextEdit
-
-            for layer in layers:
-                #self.progress_bar.show() 
-                self.log_message(f"Processing Layer: {layer}")  # Log to QTextEdit
-
-                gdf = gpd.read_file(self.gdb_path, layer=layer)
-                gdf = self.validate_geodataframe(gdf)
-                total_features += len(gdf)
-                
-                # Add a unique feature_id to each feature
-                gdf["feature_id"] = range(1, len(gdf) + 1)
-                
-                # Convert timezone-aware datetime columns to timezone-naive
-                gdf = self.make_timezone_naive(gdf)
-                duplicate_geoms, duplicate_pairs = self.check_duplicate_geometries(gdf)
-                duplicate_attrs = self.check_duplicate_attributes(gdf)
-                overlapping_polys, overlap_pairs = self.check_overlapping_polygons(gdf)
-                line_issues, line_issue_details = self.check_sharp_turns_self_intersections(gdf)
-                short_lines, short_line_details = self.check_short_linear_features(gdf,self.min_length_spinbox)
-
-
-
-                # Summarize issues for the layer
-                layer_summary[layer] = {
-                    "duplicates": len(duplicate_pairs) if duplicate_pairs else 0,
-                    "overlaps": len(overlap_pairs) if overlap_pairs else 0,
-                    "line_issues": len(line_issue_details) if line_issue_details else 0,
-                    "short_lines": len(short_line_details) if short_line_details else 0,
-
-                }
-                
-                # Save rows with issues
-                if duplicate_geoms is not None:
-                    issue_file = os.path.join(self.output_folder, f"{layer}_duplicate_geometries.gpkg")
-                    duplicate_geoms.to_file(issue_file, driver="GPKG")
-                    print(f"  - Duplicate geometries saved to {issue_file}")
-                    
-                    # Save detailed Excel for duplicate pairs and all features
-                if duplicate_pairs:
-                    # Convert duplicate pairs to DataFrame
-                    duplicate_pairs_df = pd.DataFrame(duplicate_pairs, columns=["Feature1", "Feature2"])
-                    
-                    # Ensure unique duplicate pairs by sorting Feature1 and Feature2 in each row
-                    duplicate_pairs_df[["Feature1", "Feature2"]] = np.sort(duplicate_pairs_df[["Feature1", "Feature2"]], axis=1)
-                    
-                    # Drop duplicate rows to remove reversed duplicates
-                    duplicate_pairs_df = duplicate_pairs_df.drop_duplicates()
-
-                    # Select all features excluding geometry
-                    all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
-
-                    # Define output Excel file path
-                    excel_file = os.path.join(self.output_folder, f"{layer}_duplicates.xlsx")
-                    
-                    # Write data to Excel
-                    with pd.ExcelWriter(excel_file) as writer:
-                        duplicate_pairs_df.to_excel(writer, sheet_name="Duplicate Pairs", index=False)
-                        all_features_df.to_excel(writer, sheet_name="All Features", index=False)
-
-                    print(f"  - Unique duplicate pairs and all features saved to {excel_file}")
-
-                            
-                if duplicate_attrs is not None:
-                    issue_file = os.path.join(self.output_folder, f"{layer}_duplicate_attributes.gpkg")
-                    duplicate_attrs.to_file(issue_file, driver="GPKG")
-                    print(f"  - Duplicate attributes saved to {issue_file}")
-    
-                
-                if overlapping_polys is not None:
-                    issue_file = os.path.join(self.output_folder, f"{layer}_overlapping_polygons.gpkg")
-                    overlapping_polys.to_file(issue_file, driver="GPKG")
-                    print(f"  - Overlapping polygons saved to {issue_file}")
-                    
-                    if overlap_pairs:
-                        # Create a DataFrame for overlapping pairs with overlap area
-                        overlap_pairs_df = pd.DataFrame(overlap_pairs, columns=["Feature1", "Feature2", "Overlap Area (m²)"])
-                        
-                        # Create a DataFrame for all features with feature_id
-                        all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
-                        
-                        # Save to Excel
-                        excel_file = os.path.join(self.output_folder, f"{layer}_overlaps.xlsx")
-                        with pd.ExcelWriter(excel_file) as writer:
-                            overlap_pairs_df.to_excel(writer, sheet_name="Overlap Pairs", index=False)
-                            all_features_df.to_excel(writer, sheet_name="All Features", index=False)
-                        print(f"  - Overlapping pairs and all features saved to {excel_file}")
-
-                        
-                if line_issues is not None:
-                    issue_file = os.path.join(self.output_folder, f"{layer}_line_issues.gpkg")
-                    line_issues.to_file(issue_file, driver="GPKG")
-                    print(f"  - Line issues saved to {issue_file}")
-
-                    if line_issue_details:
-                        # Convert issue details to DataFrame
-                        line_issue_details_df = pd.DataFrame(line_issue_details, columns=["FeatureIndex", "IssueType", "Angle","Lat","Lon"])
-
-                        # Merge feature_id from gdf using index
-                        line_issue_details_df["feature_id"] = gdf.iloc[line_issue_details_df["FeatureIndex"]]["feature_id"].values
-
-                        # Reorder columns to place feature_id first
-                        line_issue_details_df = line_issue_details_df[["feature_id", "FeatureIndex", "IssueType", "Angle","Lat","Lon"]]
-
-                        # Create DataFrame for all features excluding geometry
-                        all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
-
-                        # Save to Excel
-                        excel_file = os.path.join(self.output_folder, f"{layer}_line_issues.xlsx")
-                        with pd.ExcelWriter(excel_file) as writer:
-                            line_issue_details_df.to_excel(writer, sheet_name="Line Issues", index=False)
-                            all_features_df.to_excel(writer, sheet_name="All Features", index=False)
-                        print(f"  - Line issues and all features saved to {excel_file}")
-    
-                if short_lines is not None:
-                    issue_file = os.path.join(self.output_folder, f"{layer}_short_lines.gpkg")
-                    short_lines.to_file(issue_file, driver="GPKG")
-                    print(f"  - Short linear features saved to {issue_file}")
-                    
-                    if short_line_details:
-                        # Create a DataFrame for short linear features
-                        short_line_details_df = pd.DataFrame(short_line_details, columns=["FeatureID", "Length (m)"])
-                        
-                        # Create a DataFrame for all features with feature_id
-                        all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
-                        
-                        # Save to Excel
-                        excel_file = os.path.join(self.output_folder, f"{layer}_short_lines.xlsx")
-                        with pd.ExcelWriter(excel_file) as writer:
-                            short_line_details_df.to_excel(writer, sheet_name="Short Lines", index=False)
-                            all_features_df.to_excel(writer, sheet_name="All Features", index=False)
-                        print(f"  - Short linear features and all features saved to {excel_file}")
-
-
-            self.generate_summary_pdf(self.output_folder, layer_summary, total_layers, total_features)
-            self.progress_bar.hide()
-
- 
-        QMessageBox.information(self, "Run All Checks", "All checks have been completed.") 
-
-
 
 
     def run_all_checks(self):
@@ -773,13 +719,13 @@ class ProcessGDBDialog(QDialog):
 
                         if line_issue_details:
                             # Convert issue details to DataFrame
-                            line_issue_details_df = pd.DataFrame(line_issue_details, columns=["FeatureIndex", "IssueType", "Angle","Lat","Lon"])
+                            line_issue_details_df = pd.DataFrame(line_issue_details, columns=["FeatureIndex", "IssueType", "Angle","x","y"])
 
                             # Merge feature_id from gdf using index
                             line_issue_details_df["feature_id"] = gdf.iloc[line_issue_details_df["FeatureIndex"]]["feature_id"].values
 
                             # Reorder columns to place feature_id first
-                            line_issue_details_df = line_issue_details_df[["feature_id", "FeatureIndex", "IssueType", "Angle","Lat","Lon"]]
+                            line_issue_details_df = line_issue_details_df[["feature_id", "FeatureIndex", "IssueType", "Angle","x","y"]]
 
                             # Create DataFrame for all features excluding geometry
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
