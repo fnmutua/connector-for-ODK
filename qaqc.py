@@ -319,6 +319,8 @@ class ProcessGDBDialog(QDialog):
         # Check for invalid or self-intersecting geometries
         invalid_geoms = []
         for idx, geom in gdf.geometry.items():
+            if geom is None:  # Skip if geometry is None
+                continue  
             if not geom.is_valid:
                 invalid_geoms.append((idx, explain_validity(geom)))  # Store invalid geometry index and reason
             elif not geom.is_simple:
@@ -334,6 +336,9 @@ class ProcessGDBDialog(QDialog):
         overlap_pairs = []
         
         for idx, geom in gdf.geometry.items():
+            if geom is None:  # Skip if geometry is None
+                continue  
+    
             if isinstance(geom, (Polygon, MultiPolygon)):
                 possible_matches = [i for i in tree.query(geom) if i != idx]
                 
