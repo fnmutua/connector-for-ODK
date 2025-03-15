@@ -310,7 +310,8 @@ class ProcessGDBDialog(QDialog):
         """Find polygon features that truly overlap, calculate overlap area, and return overlapping pairs."""
         
         # Validate and reproject the GeoDataFrame
-        if gdf.crs != "EPSG:21037":
+        #if gdf.crs != "EPSG:21037":
+        if gdf.crs.is_geographic:
             print("Reprojecting to EPSG:21037 (Arc 1960 / UTM zone 37N) for accurate area calculation...")
             gdf = gdf.to_crs(epsg=21037)  # Ensure area calculations are in meters
         
@@ -513,7 +514,7 @@ class ProcessGDBDialog(QDialog):
             length_threshold = self.min_length_spinbox.value()
 
             # Reproject to EPSG:21037 for accurate length calculation
-            if gdf.crs != "EPSG:21037":
+            if gdf.crs.is_geographic:
                 try:
                     print("Reprojecting to EPSG:21037 (Arc 1960 / UTM zone 37N) for accurate length calculation...")
                     gdf = gdf.to_crs(epsg=21037)
