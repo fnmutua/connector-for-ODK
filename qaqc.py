@@ -44,7 +44,7 @@ from shapely.strtree import STRtree
 from fpdf import FPDF  # For generating PDF reports
 import pyproj
 from shapely.ops import transform
-
+from shapely.validation import explain_validity
 
 
 class ProcessGDBDialog(QDialog):
@@ -315,6 +315,21 @@ class ProcessGDBDialog(QDialog):
             print("Reprojecting to EPSG:21037 (Arc 1960 / UTM zone 37N) for accurate area calculation...")
             gdf = gdf.to_crs(epsg=21037)  # Ensure area calculations are in meters
         
+
+        # Check for invalid or self-intersecting geometries
+        invalid_geoms = []
+        for idx, geom in gdf.geometry.items():
+            if not geom.is_valid:
+                invalid_geoms.append((idx, explain_validity(geom)))  # Store invalid geometry index and reason
+            elif not geom.is_simple:
+                invalid_geoms.append((idx, "Geometry is self-intersecting"))  # Store self-intersecting geometry index
+        
+        if invalid_geoms:
+            print("Warning: Found invalid or self-intersecting geometries. Indices and reasons:")
+            for idx, reason in invalid_geoms:
+                print(f"Index {idx}: {reason}")
+            # Optionally, you can stop the function or fix the geometries here
+ 
         tree = STRtree(gdf.geometry)
         overlap_pairs = []
         
@@ -335,12 +350,14 @@ class ProcessGDBDialog(QDialog):
                         if not intersection.is_empty and intersection.area > tolerance:
                             overlap_area = intersection.area  # Area in square meters
                             overlap_pairs.append((idx, idx2, overlap_area))  # Store indices and overlap area
-        
+            
         if overlap_pairs:
             overlap_indices = set([idx for pair in overlap_pairs for idx in [pair[0], pair[1]]])
-            return gdf.iloc[list(overlap_indices)], overlap_pairs
+            overlapping_polys = gdf.iloc[list(overlap_indices)]
+        else:
+            overlapping_polys = None
         
-        return None, None
+        return overlapping_polys, overlap_pairs, invalid_geoms
 
  
 
@@ -445,8 +462,26 @@ class ProcessGDBDialog(QDialog):
                 continue  # Skip empty geometries
             
             # Convert MultiLineString into individual LineStrings
-            lines = [geom] if isinstance(geom, LineString) else list(geom.geoms) if isinstance(geom, MultiLineString) else []
-            
+            #lines = [geom] if isinstance(geom, LineString) else list(geom.geoms) if isinstance(geom, MultiLineString) else []
+            # Extract lines from the geometry
+            if isinstance(geom, LineString):
+                lines = [geom]  # Single LineString
+            elif isinstance(geom, MultiLineString):
+                lines = list(geom.geoms)  # List of LineStrings from MultiLineString
+            elif isinstance(geom, (Polygon, MultiPolygon)):
+                # Extract the boundary of the Polygon or MultiPolygon
+                lines = []
+                if isinstance(geom, Polygon):
+                    # Polygon boundary consists of exterior and interiors (holes)
+                    lines.append(geom.exterior)  # Exterior ring
+                    lines.extend(geom.interiors)  # Interior rings (holes)
+                elif isinstance(geom, MultiPolygon):
+                    # MultiPolygon boundary consists of boundaries of all constituent polygons
+                    for polygon in geom.geoms:
+                        lines.append(polygon.exterior)  # Exterior ring of each polygon
+                        lines.extend(polygon.interiors)  # Interior rings (holes) of each polygon
+            else:
+                lines = []  # Empty list for unsupported geometry types
             for line in lines:
                 if len(line.coords) < 3:
                     continue  # Skip lines that are too short for angle calculation
@@ -643,7 +678,8 @@ class ProcessGDBDialog(QDialog):
                     # Perform checks
                     duplicate_geoms, duplicate_pairs = self.check_duplicate_geometries(gdf)
                     duplicate_attrs = self.check_duplicate_attributes(gdf)
-                    overlapping_polys, overlap_pairs = self.check_overlapping_polygons(gdf)
+                    #overlapping_polys, overlap_pairs = self.check_overlapping_polygons(gdf)
+                    overlapping_polys, overlap_pairs, invalid_geoms = self.check_overlapping_polygons(gdf)
                     line_issues, line_issue_details = self.check_sharp_turns_self_intersections(gdf)
                     short_lines, short_line_details = self.check_short_linear_features(gdf)
 
@@ -692,6 +728,42 @@ class ProcessGDBDialog(QDialog):
                         issue_file = os.path.join(self.output_folder, f"{layer}_duplicate_attributes.gpkg")
                         duplicate_attrs.to_file(issue_file, driver="GPKG")
                         print(f"  - Duplicate attributes saved to {issue_file}")
+
+
+                    if invalid_geoms:
+                        # Save invalid geometries to a GeoPackage file
+                        invalid_geoms_file = os.path.join(self.output_folder, f"{layer}_invalid_geometries.gpkg")
+                        
+                        # Create a GeoDataFrame for invalid geometries
+                        invalid_geoms_gdf = gdf.iloc[[idx for idx, _ in invalid_geoms]].copy()
+                        
+                        # Add a column for the reason why the geometry is invalid
+                        invalid_geoms_gdf["invalid_reason"] = [reason for _, reason in invalid_geoms]
+                        
+                        # Save to GeoPackage
+                        invalid_geoms_gdf.to_file(invalid_geoms_file, driver="GPKG")
+                        print(f"  - Invalid geometries saved to {invalid_geoms_file}")
+                        
+                        # Create a DataFrame for invalid geometries with details
+                        invalid_geoms_df = pd.DataFrame(invalid_geoms, columns=["Feature Index", "Invalid Reason"])
+                        
+                        # Add additional columns from the original GeoDataFrame (e.g., feature_id)
+                        invalid_geoms_df = invalid_geoms_df.merge(
+                            gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]],
+                            left_on="Feature Index",
+                            right_index=True,
+                            how="left"
+                        )
+                        
+                        # Save to Excel
+                        excel_file = os.path.join(self.output_folder, f"{layer}_invalid_geometries.xlsx")
+                        with pd.ExcelWriter(excel_file) as writer:
+                            invalid_geoms_df.to_excel(writer, sheet_name="Invalid Geometries", index=False)
+                            gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]].to_excel(
+                                writer, sheet_name="All Features", index=False
+                            )
+                        print(f"  - Invalid geometries and all features saved to {excel_file}")
+                    
         
                     
                     if overlapping_polys is not None:
