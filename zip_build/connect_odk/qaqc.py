@@ -49,6 +49,7 @@ from shapely.ops import transform
 
 class ProcessGDBDialog(QDialog):
     def __init__(self):
+        install_missing_packages(required_packages)
         super().__init__()
         self.setWindowTitle("Quality Assurance / Quality Control")
         self.setFixedSize(1000, 600)  # Increased height to accommodate new section

@@ -6,10 +6,13 @@ import requests
 import os
 from .split_layer_dialog import SplitLayerDialog  # Import the new SplitLayerDialog
 from .resources import *
-
+from qgis.PyQt.QtWidgets import QMessageBox
+import os
+import sys
+import subprocess
 
 from .qaqc import ProcessGDBDialog  # Import the new SplitLayerDialog
-
+from qgis.utils import iface
 
 
 class ConnectODK:
@@ -61,12 +64,34 @@ class ConnectODK:
             dialog = ProcessGDBDialog()  # Create the ProcessGDBDialog
             dialog.exec_()  # Open the dialog
 
+    def ensure_fpdf_installed(self):
+        """Checks and installs fpdf if missing."""
+        try:
+            from fpdf import FPDF  # Try importing first
+            self.log_message("fpdf is already installed.")
+        except ImportError:
+            QMessageBox.information(None, "Installing Dependencies", "Installing fpdf, please wait...")
+            self.log_message("fpdf not found. Installing...")
+            
 
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "fpdf"], check=True)
+                from fpdf import FPDF  # Try again after installation
+                self.log_message("fpdf is now installed.")
+            except Exception as e:
+                QMessageBox.critical(None, "Installation Failed", f"Error installing fpdf2: {e}")
+
+
+    def log_message(self, message):
+        """Logs messages to the QGIS Python console."""
+        iface.messageBar().pushMessage("Connector for ODK", message, level=0)
+        print(f"[Connector for ODK] {message}")  # Print to console
 
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
-        
+        self.ensure_fpdf_installed()
+
         # First, check if actions already exist and remove them if they do
         if hasattr(self, 'menu_actions'):
             # Remove existing actions from the menu

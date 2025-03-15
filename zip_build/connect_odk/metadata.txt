@@ -43,3 +43,4 @@ deprecated=False
 server=False
 [license]
 license=GPL-3.0
+requirements=requirements.txt
