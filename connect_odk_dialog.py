@@ -24,10 +24,38 @@ from PyQt5.QtGui import QIcon
  
 from qgis.core import QgsMessageLog
 from collections import OrderedDict
+from PyQt5.QtCore import QRegularExpression
+from PyQt5.QtGui import QRegularExpressionValidator
+
+from PyQt5.QtWidgets import QLabel
+from PyQt5.QtGui import QPixmap
+
 
 
 class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
+ 
+
+    # Add a validation method
+    def validate_url(self):
+        url = self.url_edit.text().strip()  # Remove leading/trailing spaces
+        if not url.startswith("http://") and not url.startswith("https://"):
+            QMessageBox.warning(self, "Invalid URL", "Please enter a valid URL (must start with http:// or https://).")
+            return False
+        return True
+    
+
+    def pre_login_with_validation(self):
+        if not self.validate_url():
+            return  # Exit if the URL is invalid
+        self.pre_login()  # Proceed with the original login logic
+
+    def strip_spaces(self):
+        """Strip leading and trailing spaces on typing."""
+        current_text = self.sender().text().strip()  # Get the text and strip spaces
+        current_text = current_text.rstrip('/')  # Remove any trailing slashes
+        self.sender().setText(current_text)  # Set the stripped text back
+
 
     def __init__(self, default_url="https://collector.org", default_username="user@gmail.com", default_password="password"):
      
@@ -36,7 +64,7 @@ class ConnectODKDialog(QDialog):
 
         self.settings = QSettings("AGS", "ODKConnect")
 
-        self.setWindowTitle('ODK Connect Central')
+        self.setWindowTitle('Connector for ODK')
         self.setFixedSize(800, 250)  # Adjusted size for map and form
 
         # Initialize variables
@@ -51,8 +79,18 @@ class ConnectODKDialog(QDialog):
         # Create widgets
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("ODK Central URL")
-        #self.url_edit.setText(default_url)  # Set default URL
-        self.url_edit.setText(self.settings.value("url", default_url))  # Load saved password or default value
+    #     #self.url_edit.setText(default_url)  # Set default URL
+    #     # self.url_edit.setText(self.settings.value("url", default_url))  # Load saved password or default value
+    #     # saved_url = self.settings.value("url", default_url).strip()  # Trim any saved value
+
+    #    # Load saved URL or use default
+    #     saved_url = self.settings.value("url", default_url).strip()  # Trim any saved value
+    #     self.url_edit.setText(saved_url)  # Set the trimmed saved value
+        
+ 
+        self.url_edit.setText(self.settings.value("url", default_url).strip())  # Load saved URL or use default
+        self.url_edit.textChanged.connect(self.strip_spaces)  # Connect to strip spaces method
+
 
         self.username_edit = QLineEdit()
         self.username_edit.setPlaceholderText("Username")
@@ -72,10 +110,11 @@ class ConnectODKDialog(QDialog):
 
         self.project_combobox = QComboBox()
         self.form_combobox = QComboBox()
-
+        
+        self.filter_combobox = QComboBox()
         self.login_button = QPushButton("Login")
 
-        self.login_button.clicked.connect(self.pre_login)
+        self.login_button.clicked.connect(self.pre_login_with_validation)
 
         # Process Form button
         self.process_button = QPushButton("Process Form")
@@ -121,8 +160,41 @@ class ConnectODKDialog(QDialog):
         self.progress_bar.setAlignment(Qt.AlignCenter)
             
         layout.addWidget(self.progress_bar)  # Correct way to add widget to layout
+        # Create the QLabel for credits
 
 
+
+       # Create a QLabel for the logo
+        logo_label = QLabel()
+        pixmap = QPixmap(':/plugins/connect_odk/logo.svg')  # Replace with the actual path to your logo file
+        if not pixmap.isNull():  # Ensure the logo file is loaded correctly
+            pixmap = pixmap.scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # Scale logo
+        logo_label.setPixmap(pixmap)
+        logo_label.setAlignment(Qt.AlignCenter)
+
+        credit_label = QLabel('<a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">Powered by ODK</a>')
+
+        credit_label.setText('''
+                <div style="text-align: center;">
+                    <a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">Powered by ODK</a>
+                </div>
+            ''')
+        
+        credit_label.setAlignment(Qt.AlignCenter)
+        credit_label.setOpenExternalLinks(True)  # Allow hyperlink to open in browser
+
+        disclaimer_label = QLabel('''
+            <div style="text-align: center; font-size: 10px; color: gray;">
+                <strong>Disclaimer:</strong> This plugin, is not created, endorsed, or affiliated with ODK or its developers. For official resources, visit <a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">getodk.org</a>.
+            </div>
+        ''')
+        disclaimer_label.setOpenExternalLinks(True)
+
+
+        # Add the QLabel to the layout
+        # layout.addWidget(logo_label)
+        layout.addWidget(credit_label)
+        layout.addWidget(disclaimer_label)
 
         self.setLayout(layout)
 
@@ -459,31 +531,6 @@ class ConnectODKDialog(QDialog):
             feature['properties'] = {key: value for key, value in feature['properties'].items() if value not in [None, '', [], {}, {}, False]}
         return geojson_data
  
- 
-    def xadd_geojson_to_map(self, geojson_data,form_name):
-        """Add GeoJSON data as a layer to the map, including all properties."""
-        
-        # Create an empty memory layer for the GeoJSON data with a specific CRS (e.g., EPSG:4326)
-        #vector_layer = QgsVectorLayer("Point?crs=EPSG:4326", "GeoJSON Layer", "memory")
-        # Convert GeoJSON dictionary to JSON string
-
-        geojson_data = self.remove_empty_properties(geojson_data)
-        self.geo_data=geojson_data
-
-        geojson_str = json.dumps(geojson_data)
-        vector_layer = QgsVectorLayer(geojson_str,form_name,"ogr")
- 
-  
-        # Add the vector layer to the current map project
-        QgsProject.instance().addMapLayer(vector_layer)
-
-        # Zoom the map canvas to the extent of the layer
-        self.map_canvas.setExtent(vector_layer.extent())
-        self.map_canvas.refresh()
-        self.hide_progress()
-        
-
-        print("GeoJSON data with all properties has been added to the map.")
 
     def add_geojson_to_map(self, geojson_data, form_name):
         """Add GeoJSON data as separate layers to the map based on geometry type."""
