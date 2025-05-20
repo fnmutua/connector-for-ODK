@@ -99,7 +99,7 @@ class KesMISDialog(QDialog):
         self.mapping_table.setHorizontalHeaderLabels(["Layer Field", "API Field", "Match Score"])
         mapping_layout.addWidget(self.mapping_table)
         
-        self.submit_button = QPushButton("Submit Features to KeSMIS")
+        self.submit_button = QPushButton("Submit Data to KeSMIS")
         self.submit_button.setEnabled(False)
         self.submit_button.clicked.connect(self.submit_features)
         mapping_layout.addWidget(self.submit_button)
