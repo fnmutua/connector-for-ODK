@@ -31,6 +31,9 @@ class KesMISDialog(QDialog):
         login_box = QGroupBox("Server Login")
         login_layout = QGridLayout()
         
+        self.log_textedit = QTextEdit()
+        self.log_textedit.setReadOnly(True)
+        
         self.url_input = QLineEdit()
         self.url_input.setText("http://localhost")  # Default URL, not preloaded from QSettings
         self.url_input.setPlaceholderText("Enter server URL")
@@ -116,8 +119,19 @@ class KesMISDialog(QDialog):
         layout.addWidget(mapping_box)
         layout.addWidget(self.log_textedit)
         
+        # Clear Log Button
+        self.clear_log_button = QPushButton("Clear Log")
+        self.clear_log_button.clicked.connect(self.clear_log)
+        layout.addWidget(self.clear_log_button)
+
+
+        
         self.setLayout(layout)
 
+    def clear_log(self):
+        """Clear all messages in the log window."""
+        self.log_textedit.clear()
+        
     def _convert_to_serializable(self, value):
         """Convert QVariant and other non-serializable types to JSON-serializable types."""
         if isinstance(value, QVariant):
