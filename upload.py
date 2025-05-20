@@ -99,7 +99,7 @@ class KesMISDialog(QDialog):
         self.mapping_table.setHorizontalHeaderLabels(["Layer Field", "API Field", "Match Score"])
         mapping_layout.addWidget(self.mapping_table)
         
-        self.submit_button = QPushButton("Submit Features to API")
+        self.submit_button = QPushButton("Submit Features to KeSMIS")
         self.submit_button.setEnabled(False)
         self.submit_button.clicked.connect(self.submit_features)
         mapping_layout.addWidget(self.submit_button)
@@ -231,28 +231,38 @@ class KesMISDialog(QDialog):
 
             layer = self.layer_combo.currentData()
             parent_entity_name = self.parent_combo.currentText()
-            
-            # Get layer fields
+
             layer_fields = [f.name() for f in layer.fields()]
-            
-            # Check for 'pcode' field
+
+            use_geometry_lookup = False
             if "pcode" not in layer_fields:
-                self.log_message("Error: 'pcode' field not found in the selected layer.")
-                QMessageBox.critical(self, "Missing Field", "The selected layer must contain a 'pcode' field.")
-                self.submit_button.setEnabled(False)
-                return
-            
-            # Fetch entity data based on pcode
+                reply = QMessageBox.question(
+                    self,
+                    "Missing Pcode",
+                    "The selected layer does not contain a 'pcode' field. Would you like to use geometry to fetch parent entity data?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    use_geometry_lookup = True
+                else:
+                    self.log_message("Error: 'pcode' field not found and geometry lookup declined.")
+                    QMessageBox.critical(self, "Missing Field", "The selected layer must contain a 'pcode' field or allow geometry lookup.")
+                    self.submit_button.setEnabled(False)
+                    return
+
+            srid = layer.crs().postgisSrid()
+            self.log_message(f"Layer CRS SRID detected: {srid}")
+
             self.pcode_entity_data = {}
             self.pcode_fields = ["settlement_id", "ward_id", "subcounty_id", "county_id"]
-            
+
             headers = {
                 "Authorization": f"Bearer {self.token}",
                 "x-access-token": self.token
             }
             url = self.url_input.text()
-            
-            # Convert layer features to GeoDataFrame for pcode access
+
             gdf = gpd.GeoDataFrame.from_features([
                 {
                     "type": "Feature",
@@ -260,44 +270,106 @@ class KesMISDialog(QDialog):
                     "properties": {field: self._convert_to_serializable(f[field]) for field in layer_fields}
                 } for f in layer.getFeatures()
             ])
-            
+
             for idx, row in gdf.iterrows():
-                pcode = row["pcode"]
-                if not pcode:
-                    self.log_message(f"Empty pcode for feature index {idx}, skipped.")
+                if use_geometry_lookup and (not hasattr(row, "geometry") or not row.geometry):
+                    self.log_message(f"No geometry for feature index {idx}, skipped.")
                     continue
+
+                pcode = row["pcode"] if "pcode" in row else None
+                if pcode and not use_geometry_lookup:
+                    try:
+                        response = requests.post(
+                            f"{url}/api/v1/data/one/code",
+                            headers=headers,
+                            json={
+                                "model": parent_entity_name,
+                                "code": pcode
+                            }
+                        )
+                        if response.status_code == 200:
+                            entity_data = response.json()
+                            record = entity_data.get("data", {})
+                            # if record and record.get("id"):
+                            #     self.pcode_entity_data[idx] = {
+                            #         "settlement_id": record.get("id"),
+                            #         "ward_id": record.get("ward_id"),
+                            #         "subcounty_id": record.get("subcounty_id"),
+                            #         "county_id": record.get("county_id")
+                            #     }
+                            #     self.log_message(f"Fetched pcode data for index {idx}: {self.pcode_entity_data[idx]}")
+                            
+                            if record and record.get("id"):
+                                id_key = None
+                                parent_entity_lower = parent_entity_name.lower()
+                                if parent_entity_lower == "settlement":
+                                    id_key = "settlement_id"
+                                elif parent_entity_lower == "ward":
+                                    id_key = "ward_id"
+                                elif parent_entity_lower == "subcounty":
+                                    id_key = "subcounty_id"
+                                elif parent_entity_lower == "county":
+                                    id_key = "county_id"
+
+                                if id_key:
+                                    self.pcode_entity_data[idx] = {
+                                        id_key: record.get("id"),
+                                        "settlement_id": record.get("settlement_id"),
+                                        "ward_id": record.get("ward_id"),
+                                        "subcounty_id": record.get("subcounty_id"),
+                                        "county_id": record.get("county_id")
+                                    }
+                                    self.log_message(f"Fetched data for index {idx}: {self.pcode_entity_data[idx]}")                            
+                            
+                            
+                            else:
+                                self.log_message(f"No matching data found for pcode '{pcode}' at index {idx}")
+                        else:
+                            self.log_message(f"Failed to fetch entity data for pcode {pcode}: {response.text}")
+                    except Exception as e:
+                        self.log_message(f"Error fetching entity data for pcode {pcode}: {str(e)}")
                 
-                try:
-                    # Use POST request to /api/v1/data/one/code with model and code in body
-                    response = requests.post(
-                        f"{url}/api/v1/data/one/code",
-                        headers=headers,
-                        json={
-                            "model": parent_entity_name,
-                            "code": pcode
-                        }
-                    )
-                    
-                    if response.status_code == 200:
-                        entity_data = response.json()
-                        record = entity_data.get("data", {})
-                        self.pcode_entity_data[idx] = {
-                            #"settlement_id": record.get("id") if parent_entity_name.lower() != "settlement" else None,
-                            "settlement_id": record.get("id") ,
-                            "ward_id": record.get("ward_id"),
-                            "subcounty_id": record.get("subcounty_id"),
-                            "county_id": record.get("county_id")
-                        }
-                        # Log the fetched entity data for debugging
-                        self.log_message(f"Fetched pcode data for index {idx}: {self.pcode_entity_data[idx]}")
-                    else:
-                        self.log_message(f"Failed to fetch entity data for pcode {pcode}: {response.text}")
-                except Exception as e:
-                    self.log_message(f"Error fetching entity data for pcode {pcode}: {str(e)}")
-            
-            self.log_message("Pcode-based entity data fetched successfully")
+                elif use_geometry_lookup:
+                    try:
+                        response = requests.post(
+                            f"{url}/api/v1/data/intersect",
+                            headers=headers,
+                            json={
+                                "model": parent_entity_name,
+                                "geometry": self._convert_to_serializable(row.geometry.__geo_interface__),
+                                "srid": srid
+                            }
+                        )
+                        if response.status_code == 200:
+                            entity_data = response.json()
+                            data_list = entity_data.get("data", [])
+                            record = data_list[0] 
+                            if record and record.get("id"):
+                                self.pcode_entity_data[idx] = {
+                                    "settlement_id": record.get("id"),
+                                    "ward_id": record.get("ward_id"),
+                                    "subcounty_id": record.get("subcounty_id"),
+                                    "county_id": record.get("county_id")
+                                }
+                                self.log_message(f"Fetched geometry-based data for index {idx}: {self.pcode_entity_data[idx]}")
+                            else:
+                                self.log_message(f"No intersect result for geometry at index {idx}")
+                        else:
+                            self.log_message(f"Failed to fetch entity data for geometry at index {idx}: {response.text}")
+                    except Exception as e:
+                        self.log_message(f"Error fetching entity data for geometry at index {idx}: {str(e)}")
+                else:
+                    self.log_message(f"No pcode for feature index {idx}, skipped.")
+
+            if self.pcode_entity_data:
+                self.log_message("Pcode-based entity data fetched successfully.")
+            else:
+                self.log_message("No entity data could be fetched for any features.")
+
         except Exception as e:
             self.log_message(f"Error fetching pcode data: {str(e)}")
+
+
 
     def match_fields(self):
         """Perform one-to-one fuzzy matching with minimum 70% score, allowing unmatched fields."""
@@ -379,8 +451,8 @@ class KesMISDialog(QDialog):
         self.field_mapping[field] = api_field if api_field else None
         self.log_message(f"Updated mapping: {field} -> {api_field or 'None'}")
 
-    def zdrop_z_dimension(self, geometry):
-        """Recursively drop Z dimension from GeoJSON geometry coordinates."""
+    def drop_z_dimension(self, geometry):
+        """Drop Z dimension from GeoJSON geometry coordinates."""
         if isinstance(geometry, dict):
             if 'coordinates' in geometry:
                 geometry['coordinates'] = self.drop_z_dimension(geometry['coordinates'])
@@ -392,42 +464,6 @@ class KesMISDialog(QDialog):
             # Drop Z coordinate, keep X and Y
             return geometry[:2]
         return geometry
-    
-    def drop_z_dimension(self, geometry):
-        """
-        Drop Z (third) dimension from GeoJSON geometry objects.
-        Supports: Point, LineString, MultiLineString, Polygon, MultiPolygon
-        """
-        def strip_z(coords):
-            if isinstance(coords[0], (float, int)):
-                # Single coordinate tuple/list (e.g., [x, y, z])
-                return coords[:2]
-            else:
-                # Nested structure
-                return [strip_z(c) for c in coords]
-
-        geom_type = geometry.get('type')
-        coords = geometry.get('coordinates')
-
-        if not coords:
-            return geometry  # Skip if no coordinates
-
-        if geom_type == 'Point':
-            geometry['coordinates'] = coords[:2]
-        elif geom_type in ('LineString', 'MultiPoint'):
-            geometry['coordinates'] = [c[:2] for c in coords]
-        elif geom_type == 'MultiLineString':
-            geometry['coordinates'] = [[c[:2] for c in line] for line in coords]
-        elif geom_type == 'Polygon':
-            geometry['coordinates'] = [[c[:2] for c in ring] for ring in coords]
-        elif geom_type == 'MultiPolygon':
-            geometry['coordinates'] = [[[c[:2] for c in ring] for ring in poly] for poly in coords]
-        else:
-            # For unknown types, apply recursive strip
-            geometry['coordinates'] = strip_z(coords)
-
-        return geometry
-
 
     def submit_features(self):
         """Submit features to API with mapped fields and additional entity data from pcode."""
@@ -474,14 +510,10 @@ class KesMISDialog(QDialog):
                         elif field in entity_data and entity_data.get(field) is not None:
                             feature[api_field] = self._convert_to_serializable(entity_data.get(field))
                 
-                # Handle geometry (convert to GeoJSON if needed by API)
+                # Handle geometry (convert to GeoJSON and drop Z dimension)
                 if hasattr(row, "geometry") and row.geometry:
- 
-                    feature["geom"] = self._convert_to_serializable(self.drop_z_dimension(row.geometry.__geo_interface__))
-
-                    
-
-
+                    geojson = self.drop_z_dimension(row.geometry.__geo_interface__)
+                    feature["geom"] = self._convert_to_serializable(geojson)
                 
                 features.append(feature)
             
@@ -503,7 +535,7 @@ class KesMISDialog(QDialog):
                 headers=headers
             )
 
-            if response.status_code == 200:
+            try:
                 response_data = response.json()
                 message = response_data.get("message", "Unknown response")
                 inserted_count = response_data.get("insertedCount", 0)
@@ -512,16 +544,15 @@ class KesMISDialog(QDialog):
                 
                 log_msg = f"{message}: {inserted_count} inserted, {updated_count} updated, {failed_count} failed"
                 self.log_message(log_msg)
-                #self.log_message(f"Features submitted successfully: {response_data.get('message', 'Success')}")
-                QMessageBox.information(self, "Success", response_data.get("message", "Features submitted successfully"))
-            else:
-                response_data = response.json()
-                error_message = response_data.get("message", "Unknown error")
-                errors = response_data.get("errors", [])
-                self.log_message(f"Failed to submit features: {error_message}")
-                if errors:
-                    self.log_message(f"Errors: {json.dumps(errors, indent=2)}")
-                QMessageBox.critical(self, "Error", f"Failed to submit: {error_message}")
+                
+                if response.status_code in (200, 207):
+                    QMessageBox.information(self, "Import Status", message)
+                else:
+                    self.log_message(f"Errors: {response_data.get('errors', [])}")
+                    QMessageBox.critical(self, "Error", message)
+            except ValueError as e:
+                self.log_message(f"Failed to parse response: {response.text}")
+                QMessageBox.critical(self, "Error", f"Invalid response: {response.text}")
         except Exception as e:
             self.log_message(f"Error submitting features: {str(e)}")
             QMessageBox.critical(self, "Error", str(e))
