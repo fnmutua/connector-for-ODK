@@ -4,5 +4,7 @@
         <file>split.svg</file>
         <file>logo.svg</file>
         <file>qaqc.svg</file>
+        <file>upload.svg</file>
+        <file>upload2.svg</file>
     </qresource>
 </RCC>

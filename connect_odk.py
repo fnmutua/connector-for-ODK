@@ -12,6 +12,7 @@ import sys
 import subprocess
 
 from .qaqc import ProcessGDBDialog  # Import the new SplitLayerDialog
+from .upload import KesMISDialog  # Import the new SplitLayerDialog
 from qgis.utils import iface
 
 
@@ -64,23 +65,35 @@ class ConnectODK:
             dialog = ProcessGDBDialog()  # Create the ProcessGDBDialog
             dialog.exec_()  # Open the dialog
 
-    def ensure_fpdf_installed(self):
-        """Checks and installs fpdf if missing."""
-        try:
-            from fpdf import FPDF  # Try importing first
-            self.log_message("fpdf is already installed.")
-        except ImportError:
-            QMessageBox.information(None, "Installing Dependencies", "Installing fpdf, please wait...")
-            self.log_message("fpdf not found. Installing...")
-            
 
+    def open_kesmis_dialog(self):
+            """Open the Import dialog."""
+            dialog = KesMISDialog()  # Create the ProcessGDBDialog
+            dialog.exec_()  # Open the dialog
+
+
+    def ensure_packages_installed(self, packages):
+        """
+        Checks and installs a list of packages if missing.
+
+        Args:
+            packages (list): A list of package names to check and install.
+        """
+        for package in packages:
             try:
-                subprocess.run([sys.executable, "-m", "pip", "install", "fpdf"], check=True)
-                from fpdf import FPDF  # Try again after installation
-                self.log_message("fpdf is now installed.")
-            except Exception as e:
-                QMessageBox.critical(None, "Installation Failed", f"Error installing fpdf2: {e}")
+                __import__(package)  # Try importing the package
+                #self.log_message(f"{package} is already installed.")
+            except ImportError:
+                QMessageBox.information(None, "Installing Dependencies", f"Installing {package}, please wait...")
+                self.log_message(f"{package} not found. Installing...")
 
+                try:
+                    # Install the package using pip
+                    subprocess.run([sys.executable, "-m", "pip", "install", package], check=True)
+                    self.log_message(f"{package} is now installed.")
+                except Exception as e:
+                    QMessageBox.critical(None, "Installation Failed", f"Error installing {package}: {e}")
+                    self.log_message(f"Failed to install {package}: {e}")
 
     def log_message(self, message):
         """Logs messages to the QGIS Python console."""
@@ -90,7 +103,8 @@ class ConnectODK:
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
-        self.ensure_fpdf_installed()
+        required_packages = ["fpdf", "geopandas", "numpy", "pandas", "shapely","fiona"]
+        self.ensure_packages_installed(required_packages)
 
         # First, check if actions already exist and remove them if they do
         if hasattr(self, 'menu_actions'):
@@ -111,9 +125,11 @@ class ConnectODK:
         qq_qc_action = self.add_action(icon_path, text=self.tr(u'QA/QC'), callback=self.open_qaqc_dialog, parent=self.iface.mainWindow())
 
 
+        icon_path_upload = ':/plugins/connect_odk/upload2.svg'
+        import_action = self.add_action(icon_path_upload, text=self.tr(u'Import'), callback=self.open_kesmis_dialog, parent=self.iface.mainWindow())
 
         # Store the actions so they can be removed when reloading
-        self.menu_actions = [get_data_action, split_layer_action,qq_qc_action]
+        self.menu_actions = [get_data_action, split_layer_action,qq_qc_action,import_action]
 
 
     def unload(self):

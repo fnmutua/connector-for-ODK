@@ -21,7 +21,7 @@ def install_missing_packages(packages):
 
             
 
-from PyQt5.QtWidgets import QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox, QGroupBox,QTextEdit
+from PyQt5.QtWidgets import QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel,QCheckBox, QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox, QGroupBox,QTextEdit,QScrollArea,QGridLayout,QWidget
 from qgis.core import (
     QgsProject, 
     QgsVectorLayer,
@@ -44,15 +44,14 @@ from shapely.strtree import STRtree
 from fpdf import FPDF  # For generating PDF reports
 import pyproj
 from shapely.ops import transform
-from shapely.validation import explain_validity
+
 
 
 class ProcessGDBDialog(QDialog):
     def __init__(self):
-        install_missing_packages(required_packages)
         super().__init__()
         self.setWindowTitle("Quality Assurance / Quality Control")
-        self.setFixedSize(1000, 600)  # Increased height to accommodate new section
+        self.setFixedSize(1000, 800)  # Increased height to accommodate new section
 
         # Layout and widgets for the dialog
         layout = QVBoxLayout()
@@ -125,37 +124,49 @@ class ProcessGDBDialog(QDialog):
         # Add road parameters group to the main parameters layout
         parameters_layout.addWidget(length_group)
         
-
-
-
-
-
-        # Add more parameter widgets here if needed
-        # Example: self.parameter_spinbox = QSpinBox()
-        # parameters_layout.addWidget(self.parameter_spinbox)
+ 
         
         parameters_box.setLayout(parameters_layout)
         
+        # Create the QGroupBox for "Select Layers"
+        # Create the QGroupBox for "Select Layers"
+        self.layer_selection_box = QGroupBox("Select Layers")
+
+        # Create a QGridLayout for the checkboxes
+        self.layer_selection_layout = QGridLayout()  # Use QGridLayout for two columns
+
+        # Create a scroll area for the layer selection box
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)  # Allow the widget to resize
+        self.scroll_area.setFixedHeight(150)  # Set a fixed height for the scroll area
+
+        # Create a container widget for the scroll area
+        self.scroll_widget = QWidget()
+        self.scroll_widget.setLayout(self.layer_selection_layout)
+        self.scroll_area.setWidget(self.scroll_widget)
+
+        # Add the scroll area to the QGroupBox
+        self.layer_selection_box.setLayout(QVBoxLayout())  # Set a QVBoxLayout for the QGroupBox
+              # Add a "Select All" checkbox at the top
+        self.select_all_checkbox = QCheckBox("Select All")
+
+        self.select_all_checkbox.setEnabled(False)  # Disable until a output folder is specificed 
+        self.select_all_checkbox.stateChanged.connect(self.toggle_select_all)  # Connect to the toggle method
+        self.layer_selection_box.layout().addWidget(self.select_all_checkbox)  # Add it to the QGroupBox
+
+        self.layer_selection_box.layout().addWidget(self.scroll_area)  # Add the scroll area to the QGroupBox
+
+  
+
+
         # Processing Buttons Layout
         button_layout = QHBoxLayout()
         button_box = QGroupBox("Processing Options")
         button_box.setLayout(button_layout)
         
-        # self.duplicates_button = QPushButton("Check Duplicates")
-        # self.duplicates_button.clicked.connect(self.check_duplicates)
-        
-        # self.short_lines_button = QPushButton("Check Short Lines")
-        # self.short_lines_button.clicked.connect(self.check_short_lines)
-        
-        # self.user_input_button = QPushButton("Custom Check")
-        # self.user_input_button.clicked.connect(self.custom_check)
-        
-        # self.overlapping_polygons_button = QPushButton("Check Overlapping Polygons")
-        # self.overlapping_polygons_button.clicked.connect(self.check_overlapping_polygons)
-        
-        # self.sharp_turns_button = QPushButton("Check Sharp Turns & Intersections")
-        # self.sharp_turns_button.clicked.connect(self.check_sharp_turns)
-        
+ 
+
+
         self.run_all_button = QPushButton("Run All Checks")
         self.run_all_button.setEnabled(False)  # Disable until a output folder is specificed  
         self.run_all_button.clicked.connect(self.run_all_checks)
@@ -165,11 +176,7 @@ class ProcessGDBDialog(QDialog):
         self.log_textedit.setReadOnly(True)  # Make it read-only
         
 
-        # button_layout.addWidget(self.duplicates_button)
-        # button_layout.addWidget(self.short_lines_button)
-        # button_layout.addWidget(self.user_input_button)
-        # button_layout.addWidget(self.overlapping_polygons_button)
-        # button_layout.addWidget(self.sharp_turns_button)
+        
         button_layout.addWidget(self.run_all_button)
         
         # Add widgets to layout
@@ -179,6 +186,9 @@ class ProcessGDBDialog(QDialog):
         layout.addWidget(self.output_button)
         layout.addWidget(self.output_label)
         layout.addWidget(parameters_box)
+        #layout.addWidget(self.layer_selection_box)
+        #layout.addWidget(self.scroll_area)
+        layout.addWidget(self.layer_selection_box)
         layout.addWidget(button_box)
         layout.addWidget(self.log_textedit)  # Add it to the layout
 
@@ -229,8 +239,14 @@ class ProcessGDBDialog(QDialog):
         gdb_path = QFileDialog.getExistingDirectory(self, "Select GeoDatabase Folder")
         if gdb_path:
             self.gdb_label.setText(gdb_path)
-            self.gdb_path=gdb_path
+            self.gdb_path = gdb_path
             self.output_button.setEnabled(True)
+
+            with fiona.Env():
+                self.layers = fiona.listlayers(self.gdb_path)
+                self.populate_layer_checkboxes()  # Populate checkboxes after loading layers
+                self.select_all_checkbox.setEnabled(True)
+
 
     def select_output_folder(self):
         """Open a file dialog to select an output folder."""
@@ -239,6 +255,10 @@ class ProcessGDBDialog(QDialog):
             self.output_label.setText(output_folder)
             self.output_folder=output_folder
             self.run_all_button.setEnabled(True)  # Disable until a output folder is specificed 
+             
+
+
+
 
     def check_duplicates(self):
         """Check for duplicates in the GeoDatabase."""
@@ -260,7 +280,42 @@ class ProcessGDBDialog(QDialog):
         """Check for sharp turns and self-intersections."""
         QMessageBox.information(self, "Check Sharp Turns", "Checking for sharp turns and self-intersections...")
     
-    
+
+    def toggle_select_all(self, state):
+        """Toggle all layer checkboxes based on the "Select All" checkbox."""
+        for checkbox in self.layer_checkboxes:
+            checkbox.setChecked(state == Qt.Checked)
+
+    def get_selected_layers(self):
+        """Returns a list of selected layer names."""
+        selected_layers = []
+        for checkbox in self.layer_checkboxes:
+            if checkbox.isChecked():  # Check if the checkbox is selected
+                selected_layers.append(checkbox.text())  # Add the layer name to the list
+        return selected_layers  
+
+    def populate_layer_checkboxes(self):
+        """Clears existing checkboxes and repopulates them with layers in two columns."""
+        # Clear existing checkboxes from the layout
+        for i in reversed(range(self.layer_selection_layout.count())):
+            widget = self.layer_selection_layout.itemAt(i).widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        # Reset the list of checkboxes
+        self.layer_checkboxes = []
+
+        # Add checkboxes in two columns
+        for i, layer in enumerate(self.layers):
+            checkbox = QCheckBox(layer)
+            self.layer_checkboxes.append(checkbox)
+            row = i // 2  # Calculate row index
+            col = i % 2   # Calculate column index
+            self.layer_selection_layout.addWidget(checkbox, row, col)
+
+        # Adjust the scroll area height if needed
+        self.scroll_area.setFixedHeight(150)  # Fixed height for the scroll area
+
     def validate_geodataframe(self,gdf):
         """Ensure the GeoDataFrame has only one geometry column."""
         if "geometry" in gdf.columns and gdf.geometry.name != "geometry":
@@ -310,35 +365,14 @@ class ProcessGDBDialog(QDialog):
         """Find polygon features that truly overlap, calculate overlap area, and return overlapping pairs."""
         
         # Validate and reproject the GeoDataFrame
-        #if gdf.crs != "EPSG:21037":
-        if gdf.crs.is_geographic:
+        if gdf.crs != "EPSG:21037":
             print("Reprojecting to EPSG:21037 (Arc 1960 / UTM zone 37N) for accurate area calculation...")
             gdf = gdf.to_crs(epsg=21037)  # Ensure area calculations are in meters
         
-
-        # Check for invalid or self-intersecting geometries
-        invalid_geoms = []
-        for idx, geom in gdf.geometry.items():
-            if geom is None:  # Skip if geometry is None
-                continue  
-            if not geom.is_valid:
-                invalid_geoms.append((idx, explain_validity(geom)))  # Store invalid geometry index and reason
-            elif not geom.is_simple:
-                invalid_geoms.append((idx, "Geometry is self-intersecting"))  # Store self-intersecting geometry index
-        
-        if invalid_geoms:
-            print("Warning: Found invalid or self-intersecting geometries. Indices and reasons:")
-            for idx, reason in invalid_geoms:
-                print(f"Index {idx}: {reason}")
-            # Optionally, you can stop the function or fix the geometries here
- 
         tree = STRtree(gdf.geometry)
         overlap_pairs = []
         
         for idx, geom in gdf.geometry.items():
-            if geom is None:  # Skip if geometry is None
-                continue  
-    
             if isinstance(geom, (Polygon, MultiPolygon)):
                 possible_matches = [i for i in tree.query(geom) if i != idx]
                 
@@ -355,14 +389,12 @@ class ProcessGDBDialog(QDialog):
                         if not intersection.is_empty and intersection.area > tolerance:
                             overlap_area = intersection.area  # Area in square meters
                             overlap_pairs.append((idx, idx2, overlap_area))  # Store indices and overlap area
-            
+        
         if overlap_pairs:
             overlap_indices = set([idx for pair in overlap_pairs for idx in [pair[0], pair[1]]])
-            overlapping_polys = gdf.iloc[list(overlap_indices)]
-        else:
-            overlapping_polys = None
+            return gdf.iloc[list(overlap_indices)], overlap_pairs
         
-        return overlapping_polys, overlap_pairs, invalid_geoms
+        return None, None
 
  
 
@@ -467,26 +499,8 @@ class ProcessGDBDialog(QDialog):
                 continue  # Skip empty geometries
             
             # Convert MultiLineString into individual LineStrings
-            #lines = [geom] if isinstance(geom, LineString) else list(geom.geoms) if isinstance(geom, MultiLineString) else []
-            # Extract lines from the geometry
-            if isinstance(geom, LineString):
-                lines = [geom]  # Single LineString
-            elif isinstance(geom, MultiLineString):
-                lines = list(geom.geoms)  # List of LineStrings from MultiLineString
-            elif isinstance(geom, (Polygon, MultiPolygon)):
-                # Extract the boundary of the Polygon or MultiPolygon
-                lines = []
-                if isinstance(geom, Polygon):
-                    # Polygon boundary consists of exterior and interiors (holes)
-                    lines.append(geom.exterior)  # Exterior ring
-                    lines.extend(geom.interiors)  # Interior rings (holes)
-                elif isinstance(geom, MultiPolygon):
-                    # MultiPolygon boundary consists of boundaries of all constituent polygons
-                    for polygon in geom.geoms:
-                        lines.append(polygon.exterior)  # Exterior ring of each polygon
-                        lines.extend(polygon.interiors)  # Interior rings (holes) of each polygon
-            else:
-                lines = []  # Empty list for unsupported geometry types
+            lines = [geom] if isinstance(geom, LineString) else list(geom.geoms) if isinstance(geom, MultiLineString) else []
+            
             for line in lines:
                 if len(line.coords) < 3:
                     continue  # Skip lines that are too short for angle calculation
@@ -554,7 +568,7 @@ class ProcessGDBDialog(QDialog):
             length_threshold = self.min_length_spinbox.value()
 
             # Reproject to EPSG:21037 for accurate length calculation
-            if gdf.crs.is_geographic:
+            if gdf.crs != "EPSG:21037":
                 try:
                     print("Reprojecting to EPSG:21037 (Arc 1960 / UTM zone 37N) for accurate length calculation...")
                     gdf = gdf.to_crs(epsg=21037)
@@ -646,24 +660,34 @@ class ProcessGDBDialog(QDialog):
     def run_all_checks(self):
         """Run all checks sequentially."""
         try:
+
+            selected_layers = self.get_selected_layers()
+            if not selected_layers:
+                QMessageBox.warning(self, "No Layers Selected", "Please select at least one layer to process.")
+                return
+
             # Initialize progress bar and label
             self.progress_bar.show()
             self.progress_label.show()
             self.progress_bar.setValue(0)  # Reset progress bar
+
+
+
+
 
             os.makedirs(self.output_folder, exist_ok=True)
             layer_summary = {}
             total_features = 0
 
             with fiona.Env():
-                layers = fiona.listlayers(self.gdb_path)
-                total_layers = len(layers)
-                self.log_message(f"Total Number of layers: {total_layers}")
+                #layers = fiona.listlayers(self.gdb_path)
+                total_layers = len(selected_layers)
+                self.log_message(f"Total Number of selected layers: {total_layers}")
 
                 # Set progress bar range based on total layers
                 self.progress_bar.setRange(0, total_layers)
 
-                for i, layer in enumerate(layers):
+                for i, layer in enumerate(selected_layers):
                     # Update progress bar and label
                     self.progress_bar.setValue(i + 1)
                     self.progress_label.setText(f"Processing Layer {i + 1} of {total_layers}: {layer}")
@@ -683,8 +707,7 @@ class ProcessGDBDialog(QDialog):
                     # Perform checks
                     duplicate_geoms, duplicate_pairs = self.check_duplicate_geometries(gdf)
                     duplicate_attrs = self.check_duplicate_attributes(gdf)
-                    #overlapping_polys, overlap_pairs = self.check_overlapping_polygons(gdf)
-                    overlapping_polys, overlap_pairs, invalid_geoms = self.check_overlapping_polygons(gdf)
+                    overlapping_polys, overlap_pairs = self.check_overlapping_polygons(gdf)
                     line_issues, line_issue_details = self.check_sharp_turns_self_intersections(gdf)
                     short_lines, short_line_details = self.check_short_linear_features(gdf)
 
@@ -733,42 +756,6 @@ class ProcessGDBDialog(QDialog):
                         issue_file = os.path.join(self.output_folder, f"{layer}_duplicate_attributes.gpkg")
                         duplicate_attrs.to_file(issue_file, driver="GPKG")
                         print(f"  - Duplicate attributes saved to {issue_file}")
-
-
-                    if invalid_geoms:
-                        # Save invalid geometries to a GeoPackage file
-                        invalid_geoms_file = os.path.join(self.output_folder, f"{layer}_invalid_geometries.gpkg")
-                        
-                        # Create a GeoDataFrame for invalid geometries
-                        invalid_geoms_gdf = gdf.iloc[[idx for idx, _ in invalid_geoms]].copy()
-                        
-                        # Add a column for the reason why the geometry is invalid
-                        invalid_geoms_gdf["invalid_reason"] = [reason for _, reason in invalid_geoms]
-                        
-                        # Save to GeoPackage
-                        invalid_geoms_gdf.to_file(invalid_geoms_file, driver="GPKG")
-                        print(f"  - Invalid geometries saved to {invalid_geoms_file}")
-                        
-                        # Create a DataFrame for invalid geometries with details
-                        invalid_geoms_df = pd.DataFrame(invalid_geoms, columns=["Feature Index", "Invalid Reason"])
-                        
-                        # Add additional columns from the original GeoDataFrame (e.g., feature_id)
-                        invalid_geoms_df = invalid_geoms_df.merge(
-                            gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]],
-                            left_on="Feature Index",
-                            right_index=True,
-                            how="left"
-                        )
-                        
-                        # Save to Excel
-                        excel_file = os.path.join(self.output_folder, f"{layer}_invalid_geometries.xlsx")
-                        with pd.ExcelWriter(excel_file) as writer:
-                            invalid_geoms_df.to_excel(writer, sheet_name="Invalid Geometries", index=False)
-                            gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]].to_excel(
-                                writer, sheet_name="All Features", index=False
-                            )
-                        print(f"  - Invalid geometries and all features saved to {excel_file}")
-                    
         
                     
                     if overlapping_polys is not None:
