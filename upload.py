@@ -1,8 +1,8 @@
 import subprocess
 import sys
 import requests
-from PyQt5.QtWidgets import QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox, QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox, QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QTableWidgetItem
-from PyQt5.QtCore import QVariant, QSettings
+from PyQt5.QtWidgets import QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox, QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox, QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QTableWidgetItem 
+from PyQt5.QtCore import QVariant, QSettings, Qt  # Added Qt import
 from fuzzywuzzy import fuzz
 import json
 import geopandas as gpd
@@ -13,7 +13,7 @@ class KesMISDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Export data to KeSMIS")
-        self.setFixedSize(1000, 800)
+        self.setMinimumSize(800, 650)  # Set minimum size for small screens
 
         # Initialize variables
         self.token = None
@@ -24,18 +24,16 @@ class KesMISDialog(QDialog):
         self.is_logged_in = False  # Track login state
         self.settings = QSettings("YourOrganization", "KesMIS")  # Initialize QSettings
         
-        # Layout
-        layout = QVBoxLayout()
+        # Main widget and layout
+        main_widget = QWidget()
+        main_layout = QVBoxLayout(main_widget)
 
         # Server Login Section
         login_box = QGroupBox("Server Login")
         login_layout = QGridLayout()
         
-        self.log_textedit = QTextEdit()
-        self.log_textedit.setReadOnly(True)
-        
         self.url_input = QLineEdit()
-        self.url_input.setText("http://localhost")  # Default URL, not preloaded from QSettings
+        self.url_input.setText("http://localhost")  # Default URL
         self.url_input.setPlaceholderText("Enter server URL")
         self.username_input = QLineEdit()
         self.username_input.setText(self.settings.value("username", ""))  # Preload username
@@ -110,23 +108,34 @@ class KesMISDialog(QDialog):
         mapping_box.setLayout(mapping_layout)
 
         # Log Display
+        log_box = QGroupBox("Log")
+        log_layout = QVBoxLayout()
         self.log_textedit = QTextEdit()
         self.log_textedit.setReadOnly(True)
-
-        # Add to main layout
-        layout.addWidget(login_box)
-        layout.addWidget(layer_box)
-        layout.addWidget(mapping_box)
-        layout.addWidget(self.log_textedit)
+        self.log_textedit.setFixedHeight(100)  # Fixed height for log window
+        self.log_textedit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)  # Always show vertical scrollbar
+        log_layout.addWidget(self.log_textedit)
         
-        # Clear Log Button
         self.clear_log_button = QPushButton("Clear Log")
         self.clear_log_button.clicked.connect(self.clear_log)
-        layout.addWidget(self.clear_log_button)
+        log_layout.addWidget(self.clear_log_button)
+        log_box.setLayout(log_layout)
 
-
+        # Add to main layout
+        main_layout.addWidget(login_box)
+        main_layout.addWidget(layer_box)
+        main_layout.addWidget(mapping_box)
+        main_layout.addWidget(log_box)
         
-        self.setLayout(layout)
+        # Create scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(main_widget)
+        
+        # Set main dialog layout
+        dialog_layout = QVBoxLayout()
+        dialog_layout.addWidget(scroll_area)
+        self.setLayout(dialog_layout)
 
     def clear_log(self):
         """Clear all messages in the log window."""
@@ -304,15 +313,6 @@ class KesMISDialog(QDialog):
                         if response.status_code == 200:
                             entity_data = response.json()
                             record = entity_data.get("data", {})
-                            # if record and record.get("id"):
-                            #     self.pcode_entity_data[idx] = {
-                            #         "settlement_id": record.get("id"),
-                            #         "ward_id": record.get("ward_id"),
-                            #         "subcounty_id": record.get("subcounty_id"),
-                            #         "county_id": record.get("county_id")
-                            #     }
-                            #     self.log_message(f"Fetched pcode data for index {idx}: {self.pcode_entity_data[idx]}")
-                            
                             if record and record.get("id"):
                                 id_key = None
                                 parent_entity_lower = parent_entity_name.lower()
@@ -334,8 +334,6 @@ class KesMISDialog(QDialog):
                                         "county_id": record.get("county_id")
                                     }
                                     self.log_message(f"Fetched data for index {idx}: {self.pcode_entity_data[idx]}")                            
-                            
-                            
                             else:
                                 self.log_message(f"No matching data found for pcode '{pcode}' at index {idx}")
                         else:
@@ -382,8 +380,6 @@ class KesMISDialog(QDialog):
 
         except Exception as e:
             self.log_message(f"Error fetching pcode data: {str(e)}")
-
-
 
     def match_fields(self):
         """Perform one-to-one fuzzy matching with minimum 70% score, allowing unmatched fields."""
