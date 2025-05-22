@@ -1,605 +1,432 @@
-
-import subprocess
 import sys
-
-# List of required packages
-required_packages = [
-    "geopandas", "fiona", "numpy", "pandas", "shapely", "fpdf","pyproj",
-]
-
-# Function to check and install missing packages----------------------
-#---------------------------------------------------------------------
-#---------------------------------------------------------------------
-#---------------------------------------------------------------------
-def install_missing_packages(packages):
-    for package in packages:
-        try:
-            __import__(package)  # Try importing the package
-        except ImportError:
-            print(f"{package} not found. Installing...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-            
-
-from PyQt5.QtWidgets import QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel,QCheckBox, QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox, QGroupBox,QTextEdit,QScrollArea,QGridLayout,QWidget
-from qgis.core import (
-    QgsProject, 
-    QgsVectorLayer,
-    QgsFeatureRequest,
-    QgsFields,
-    QgsFeature,
-    QgsWkbTypes,
-)
-
-from PyQt5.QtCore import Qt  # Add this import for Qt
-from PyQt5.QtWidgets import QApplication  # Add this import
-
-import geopandas as gpd
-import fiona
 import os
 import numpy as np
 import pandas as pd
-from shapely.geometry import LineString, Polygon, MultiPolygon, MultiLineString,Point
+import geopandas as gpd
+import fiona
+from shapely.geometry import LineString, MultiLineString, Polygon, MultiPolygon
 from shapely.strtree import STRtree
-from fpdf import FPDF  # For generating PDF reports
+from fpdf import FPDF
 import pyproj
-from shapely.ops import transform
-
-
+from fuzzywuzzy import process
+from PyQt5.QtWidgets import (
+    QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox, QLineEdit,
+    QSpinBox, QFileDialog, QHBoxLayout, QMessageBox, QGroupBox,
+    QTextEdit, QScrollArea, QGridLayout, QWidget, QApplication
+)
+from PyQt5.QtCore import Qt
+from qgis.core import (
+    QgsProject, QgsVectorLayer, QgsFeatureRequest, QgsFields, QgsFeature, QgsWkbTypes
+)
 
 class ProcessGDBDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Quality Assurance / Quality Control")
-        self.setFixedSize(1000, 800)  # Increased height to accommodate new section
+        self.setFixedSize(1000, 800)
 
-        # Layout and widgets for the dialog
-        layout = QVBoxLayout()
-
-        # Label
-        self.label = QLabel("Select a GeoDatabase, output folder, and set criteria")
+        # Set the Excel file path relative to the plugin directory
+        plugin_dir = os.path.dirname(__file__)
+        #self.excel_file = os.path.join(plugin_dir, "data", "dictionary.xlsx")
+        self.excel_file = os.path.join(plugin_dir, "dictionary.xlsx")
         
-        # Button to select GeoDatabase
+        # Check if the Excel file exists
+        if not os.path.exists(self.excel_file):
+            self.excel_file = None
+            print(f"Error: Excel file not found at {self.excel_file}")
+
+        # Main layout for the dialog
+        main_layout = QVBoxLayout()
+
+        # Top label
+        self.label = QLabel("Select a GeoDatabase, output folder, and set criteria")
+        main_layout.addWidget(self.label)
+
+        # Horizontal layout for select inputs (left) and parameters (right)
+        top_hbox = QHBoxLayout()
+
+        # Left side: Select inputs panel (50% width)
+        select_inputs_box = QGroupBox("Select Inputs")
+        select_inputs_layout = QVBoxLayout()
+        select_inputs_layout.setSpacing(10)
+
+        # GeoDatabase selection
         self.gdb_button = QPushButton("Select GeoDatabase")
         self.gdb_button.clicked.connect(self.select_gdb)
-        
-        # Label to display selected GDB
         self.gdb_label = QLabel("No GeoDatabase selected")
         self.gdb_label.setStyleSheet("font-style: italic; color: gray;")
-        
-        # Button to select output folder
+        select_inputs_layout.addWidget(self.gdb_button)
+        select_inputs_layout.addWidget(self.gdb_label)
+
+        # Output folder selection
         self.output_button = QPushButton("Select Output Folder")
-        self.output_button.setEnabled(False)  # Disable until a database is selected
+        self.output_button.setEnabled(False)
         self.output_button.clicked.connect(self.select_output_folder)
-        
-        # Label to display selected output folder
         self.output_label = QLabel("No output folder selected")
         self.output_label.setStyleSheet("font-style: italic; color: gray;")
-        
-        # Parameters Section
+        select_inputs_layout.addWidget(self.output_button)
+        select_inputs_layout.addWidget(self.output_label)
+
+        # Add stretch to push content up
+        select_inputs_layout.addStretch()
+        select_inputs_box.setLayout(select_inputs_layout)
+
+        # Right side: Parameters (50% width)
         parameters_box = QGroupBox("Set Parameters")
         parameters_layout = QVBoxLayout()
-        
 
-
-            # Angular Parameters Group
+        # Angular Parameters Group
         params_group = QGroupBox("Linear Feature Parameters")
         angular_params_layout = QVBoxLayout()
-
-        # Spin boxes for min and max angle
         self.min_angle_spinbox = QSpinBox()
         self.min_angle_spinbox.setRange(0, 360)
         self.min_angle_spinbox.setPrefix("Min Angle: ")
-        self.min_angle_spinbox.setValue(1)  # Default value for max angle
-
+        self.min_angle_spinbox.setValue(1)
         self.max_angle_spinbox = QSpinBox()
         self.max_angle_spinbox.setRange(0, 360)
         self.max_angle_spinbox.setPrefix("Max Angle: ")
-        self.max_angle_spinbox.setValue(45)  # Default value for max angle
-
-        # Add min/max angle to road parameters group
+        self.max_angle_spinbox.setValue(45)
         angular_params_layout.addWidget(self.min_angle_spinbox)
         angular_params_layout.addWidget(self.max_angle_spinbox)
         params_group.setLayout(angular_params_layout)
-
-        # Add road parameters group to the main parameters layout
         parameters_layout.addWidget(params_group)
 
-
-  
-        # length Parameters Group
+        # Length Parameters Group
         length_group = QGroupBox("Length Parameters")
         length_params_layout = QVBoxLayout()
-
-        # Spin boxes for min and max angle
         self.min_length_spinbox = QSpinBox()
         self.min_length_spinbox.setRange(0, 50)
         self.min_length_spinbox.setPrefix("Min Length(m): ")
-        self.min_length_spinbox.setValue(10)  # Default value for max angle
- 
-        # Add min/max angle to road parameters group
-        length_params_layout.addWidget(self.min_length_spinbox) 
+        self.min_length_spinbox.setValue(10)
+        length_params_layout.addWidget(self.min_length_spinbox)
         length_group.setLayout(length_params_layout)
-
-        # Add road parameters group to the main parameters layout
         parameters_layout.addWidget(length_group)
-        
- 
-        
+
         parameters_box.setLayout(parameters_layout)
-        
-        # Create the QGroupBox for "Select Layers"
-        # Create the QGroupBox for "Select Layers"
+
+        # Add select inputs and parameters to top_hbox with equal stretch
+        top_hbox.addWidget(select_inputs_box, 1)
+        top_hbox.addWidget(parameters_box, 1)
+        main_layout.addLayout(top_hbox)
+
+        # Layers selection (100% width)
         self.layer_selection_box = QGroupBox("Select Layers")
-
-        # Create a QGridLayout for the checkboxes
-        self.layer_selection_layout = QGridLayout()  # Use QGridLayout for two columns
-
-        # Create a scroll area for the layer selection box
+        self.layer_selection_layout = QGridLayout()
         self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)  # Allow the widget to resize
-        self.scroll_area.setFixedHeight(150)  # Set a fixed height for the scroll area
-
-        # Create a container widget for the scroll area
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFixedHeight(150)
         self.scroll_widget = QWidget()
         self.scroll_widget.setLayout(self.layer_selection_layout)
         self.scroll_area.setWidget(self.scroll_widget)
-
-        # Add the scroll area to the QGroupBox
-        self.layer_selection_box.setLayout(QVBoxLayout())  # Set a QVBoxLayout for the QGroupBox
-              # Add a "Select All" checkbox at the top
+        self.layer_selection_box.setLayout(QVBoxLayout())
         self.select_all_checkbox = QCheckBox("Select All")
+        self.select_all_checkbox.setEnabled(False)
+        self.select_all_checkbox.stateChanged.connect(self.toggle_select_all)
+        self.layer_selection_box.layout().addWidget(self.select_all_checkbox)
+        self.layer_selection_box.layout().addWidget(self.scroll_area)
+        main_layout.addWidget(self.layer_selection_box)
 
-        self.select_all_checkbox.setEnabled(False)  # Disable until a output folder is specificed 
-        self.select_all_checkbox.stateChanged.connect(self.toggle_select_all)  # Connect to the toggle method
-        self.layer_selection_box.layout().addWidget(self.select_all_checkbox)  # Add it to the QGroupBox
-
-        self.layer_selection_box.layout().addWidget(self.scroll_area)  # Add the scroll area to the QGroupBox
-
-  
-
-
-        # Processing Buttons Layout
+        # Processing buttons (100% width)
         button_layout = QHBoxLayout()
         button_box = QGroupBox("Processing Options")
         button_box.setLayout(button_layout)
-        
- 
-
-
         self.run_all_button = QPushButton("Run All Checks")
-        self.run_all_button.setEnabled(False)  # Disable until a output folder is specificed  
+        self.run_all_button.setEnabled(False)
         self.run_all_button.clicked.connect(self.run_all_checks)
-    
-            # Add a QTextEdit for logging
-        self.log_textedit = QTextEdit()
-        self.log_textedit.setReadOnly(True)  # Make it read-only
-        
-
-        
         button_layout.addWidget(self.run_all_button)
-        
-        # Add widgets to layout
-        layout.addWidget(self.label)
-        layout.addWidget(self.gdb_button)
-        layout.addWidget(self.gdb_label)
-        layout.addWidget(self.output_button)
-        layout.addWidget(self.output_label)
-        layout.addWidget(parameters_box)
-        #layout.addWidget(self.layer_selection_box)
-        #layout.addWidget(self.scroll_area)
-        layout.addWidget(self.layer_selection_box)
-        layout.addWidget(button_box)
-        layout.addWidget(self.log_textedit)  # Add it to the layout
+        main_layout.addWidget(button_box)
 
+        # Log section (100% width)
+        log_vbox = QVBoxLayout()
+        # Clear Log button (100% width)
+        clear_log_hbox = QHBoxLayout()
+        self.clear_log_button = QPushButton("Clear Log")
+        self.clear_log_button.clicked.connect(self.clear_log)
+        clear_log_hbox.addStretch()
+        clear_log_hbox.addWidget(self.clear_log_button)
+        clear_log_hbox.addStretch()
+        log_vbox.addLayout(clear_log_hbox)
+        # Log widget (100% width)
+        self.log_textedit = QTextEdit()
+        self.log_textedit.setReadOnly(True)
+        log_vbox.addWidget(self.log_textedit)
+        main_layout.addLayout(log_vbox)
 
-
-        # Set up the UI components
-         # Add a QLabel for progress status
+        # Progress bar and label (100% width)
         self.progress_label = QLabel("Progress: Idle")
-        layout.addWidget(self.progress_label)
-
-        # Set up the progress bar
+        main_layout.addWidget(self.progress_label)
         self.progress_bar = QProgressBar(self)
-        self.progress_bar.setRange(0, 100)  # Set initial range (0-100%)
-        self.progress_bar.setValue(0)  # Start at 0%
-        self.progress_bar.setTextVisible(True)  # Show percentage text
-        layout.addWidget(self.progress_bar)
-
-        # Hide the progress bar initially
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        main_layout.addWidget(self.progress_bar)
         self.progress_bar.hide()
         self.progress_label.hide()
 
-
-        # Inside the __init__ method of ProcessGDBDialog
+        # PDF and folder links (100% width)
         self.pdf_link_label = QLabel("PDF Report: <a href='#'>Open Report</a>")
-        self.pdf_link_label.setOpenExternalLinks(True)  # Allow opening external links
+        self.pdf_link_label.setOpenExternalLinks(True)
         self.pdf_link_label.setStyleSheet("color: blue; text-decoration: underline;")
-        self.pdf_link_label.hide()  # Hide initially
-        layout.addWidget(self.pdf_link_label)  # Add it to the layout
-
-
-        # Inside the __init__ method of ProcessGDBDialog
+        self.pdf_link_label.hide()
+        main_layout.addWidget(self.pdf_link_label)
         self.folder_link_label = QLabel("Open Folder: <a href='#'>Open Output Folder</a>")
-        self.folder_link_label.setOpenExternalLinks(True)  # Allow opening external links
+        self.folder_link_label.setOpenExternalLinks(True)
         self.folder_link_label.setStyleSheet("color: blue; text-decoration: underline;")
-        self.folder_link_label.hide()  # Hide initially
-        layout.addWidget(self.folder_link_label)  # Add it to the layout
+        self.folder_link_label.hide()
+        main_layout.addWidget(self.folder_link_label)
 
+        self.setLayout(main_layout)
 
-        self.setLayout(layout)
-        
+    def clear_log(self):
+        """Clear the log widget content."""
+        self.log_textedit.clear()
 
     def log_message(self, message):
-        """Append a message to the log widget."""
         self.log_textedit.append(message)
 
     def select_gdb(self):
-        """Open a folder dialog to select a GeoDatabase (which is a folder)."""
         gdb_path = QFileDialog.getExistingDirectory(self, "Select GeoDatabase Folder")
         if gdb_path:
             self.gdb_label.setText(gdb_path)
             self.gdb_path = gdb_path
             self.output_button.setEnabled(True)
-
             with fiona.Env():
                 self.layers = fiona.listlayers(self.gdb_path)
-                self.populate_layer_checkboxes()  # Populate checkboxes after loading layers
+                self.populate_layer_checkboxes()
                 self.select_all_checkbox.setEnabled(True)
 
-
     def select_output_folder(self):
-        """Open a file dialog to select an output folder."""
         output_folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
         if output_folder:
             self.output_label.setText(output_folder)
-            self.output_folder=output_folder
-            self.run_all_button.setEnabled(True)  # Disable until a output folder is specificed 
-             
-
-
-
-
-    def check_duplicates(self):
-        """Check for duplicates in the GeoDatabase."""
-        QMessageBox.information(self, "Check Duplicates", "Checking for duplicate geometries or attributes...")
-    
-    def check_short_lines(self):
-        """Check for short lines in linear features."""
-        QMessageBox.information(self, "Check Short Lines", "Checking for short line features...")
-    
-    def custom_check(self):
-        """Allow user input for a custom check."""
-        QMessageBox.information(self, "Custom Check", "Performing user-defined checks...")
-    
-    def check_overlapping_polygons(self):
-        """Check for overlapping polygons."""
-        QMessageBox.information(self, "Check Overlapping Polygons", "Checking for overlapping polygons...")
-    
-    def check_sharp_turns(self):
-        """Check for sharp turns and self-intersections."""
-        QMessageBox.information(self, "Check Sharp Turns", "Checking for sharp turns and self-intersections...")
-    
+            self.output_folder = output_folder
+            self.run_all_button.setEnabled(True)
 
     def toggle_select_all(self, state):
-        """Toggle all layer checkboxes based on the "Select All" checkbox."""
         for checkbox in self.layer_checkboxes:
             checkbox.setChecked(state == Qt.Checked)
 
     def get_selected_layers(self):
-        """Returns a list of selected layer names."""
         selected_layers = []
         for checkbox in self.layer_checkboxes:
-            if checkbox.isChecked():  # Check if the checkbox is selected
-                selected_layers.append(checkbox.text())  # Add the layer name to the list
+            if checkbox.isChecked():
+                selected_layers.append(checkbox.text())
         return selected_layers  
 
     def populate_layer_checkboxes(self):
-        """Clears existing checkboxes and repopulates them with layers in two columns."""
-        # Clear existing checkboxes from the layout
         for i in reversed(range(self.layer_selection_layout.count())):
             widget = self.layer_selection_layout.itemAt(i).widget()
             if widget is not None:
                 widget.deleteLater()
-
-        # Reset the list of checkboxes
         self.layer_checkboxes = []
-
-        # Add checkboxes in two columns
         for i, layer in enumerate(self.layers):
             checkbox = QCheckBox(layer)
             self.layer_checkboxes.append(checkbox)
-            row = i // 2  # Calculate row index
-            col = i % 2   # Calculate column index
+            row = i // 2
+            col = i % 2
             self.layer_selection_layout.addWidget(checkbox, row, col)
+        self.scroll_area.setFixedHeight(150)
 
-        # Adjust the scroll area height if needed
-        self.scroll_area.setFixedHeight(150)  # Fixed height for the scroll area
-
-    def validate_geodataframe(self,gdf):
-        """Ensure the GeoDataFrame has only one geometry column."""
+    def validate_geodataframe(self, gdf):
         if "geometry" in gdf.columns and gdf.geometry.name != "geometry":
             gdf = gdf.set_geometry("geometry", inplace=False)
         return gdf
 
-    def make_timezone_naive(self,gdf):
-        """Convert timezone-aware datetime columns to timezone-naive."""
+    def make_timezone_naive(self, gdf):
         for col in gdf.columns:
             if pd.api.types.is_datetime64_any_dtype(gdf[col]):
-                gdf[col] = gdf[col].dt.tz_localize(None)  # Remove timezone
+                gdf[col] = gdf[col].dt.tz_localize(None)
         return gdf
     
-    def check_duplicate_geometries(self,gdf):
-        """
-        Identify duplicate geometries in a GeoDataFrame.
-        Skips None geometries and returns a DataFrame of duplicates with their pairs.
-        """
+    def check_duplicate_geometries(self, gdf):
         duplicate_pairs = []
         seen = {}
-
         for idx, geom in gdf.geometry.items():
-            if geom is None or geom.is_empty:  # Skip None or empty geometries
+            if geom is None or geom.is_empty:
                 print(f"Skipping None or empty geometry at index {idx}")
                 continue
-
-            geom_wkt = geom.wkt  # Use WKT for exact comparison
+            geom_wkt = geom.wkt
             if geom_wkt in seen:
                 duplicate_pairs.append((seen[geom_wkt], idx))
             else:
                 seen[geom_wkt] = idx
-
         if duplicate_pairs:
-            duplicate_indices = {idx for pair in duplicate_pairs for idx in pair}  # Set of indices
-            return gdf.loc[list(duplicate_indices)], duplicate_pairs  # Convert set to list
-
+            duplicate_indices = {idx for pair in duplicate_pairs for idx in pair}
+            return gdf.loc[list(duplicate_indices)], duplicate_pairs
         return None, None
 
-    def check_duplicate_attributes(self,gdf):
-        """Identify features with identical attribute values excluding geometry."""
+    def check_duplicate_attributes(self, gdf):
         attr_columns = [col for col in gdf.columns if col != "geometry"]
         duplicates = gdf[gdf.duplicated(subset=attr_columns, keep=False)]
         exact_duplicates = duplicates[duplicates.duplicated(subset=attr_columns, keep="first")]
         return exact_duplicates if not exact_duplicates.empty else None
 
-    def check_overlapping_polygons(self,gdf, tolerance=0.01):
-        """Find polygon features that truly overlap, calculate overlap area, and return overlapping pairs."""
-        
-        # Validate and reproject the GeoDataFrame
+    def check_overlapping_polygons(self, gdf, tolerance=0.01):
         if gdf.crs != "EPSG:21037":
-            print("Reprojecting to EPSG:21037 (Arc 1960 / UTM zone 37N) for accurate area calculation...")
-            gdf = gdf.to_crs(epsg=21037)  # Ensure area calculations are in meters
-        
+            print("Reprojecting to EPSG:21037 for accurate area calculation...")
+            gdf = gdf.to_crs(epsg=21037)
         tree = STRtree(gdf.geometry)
         overlap_pairs = []
-        
         for idx, geom in gdf.geometry.items():
             if isinstance(geom, (Polygon, MultiPolygon)):
                 possible_matches = [i for i in tree.query(geom) if i != idx]
-                
                 for idx2 in possible_matches:
                     geom2 = gdf.geometry.iloc[idx2]
-                    
-                    # Ensure it is a polygon and check if they intersect
                     if isinstance(geom2, (Polygon, MultiPolygon)) and geom.intersects(geom2):
-                        
-                        # Compute the intersection
                         intersection = geom.intersection(geom2)
-                        
-                        # Ensure the intersection is not just a line or point
                         if not intersection.is_empty and intersection.area > tolerance:
-                            overlap_area = intersection.area  # Area in square meters
-                            overlap_pairs.append((idx, idx2, overlap_area))  # Store indices and overlap area
-        
+                            overlap_area = intersection.area
+                            overlap_pairs.append((idx, idx2, overlap_area))
         if overlap_pairs:
             overlap_indices = set([idx for pair in overlap_pairs for idx in [pair[0], pair[1]]])
             return gdf.iloc[list(overlap_indices)], overlap_pairs
-        
         return None, None
 
- 
-
-    def _check_sharp_turns_self_intersections(self, gdf, lower_angle_threshold=15, upper_angle_threshold=30):
-        """Find sharp turns and self-intersections in line features.
-        
-        Args:
-            gdf: GeoDataFrame containing line geometries.
-            lower_angle_threshold: Minimum acceptable angle (in degrees).
-            upper_angle_threshold: Maximum acceptable angle (in degrees).
-        
-        Returns:
-            A tuple containing:
-            - A GeoDataFrame with features that have issues.
-            - A list of tuples with details about the issues.
-        """
+    def check_sharp_turns_self_intersections(self, gdf):
         gdf = self.validate_geodataframe(gdf)
         issue_indices = set()
         issue_details = []
-
         lower_angle_threshold = self.min_angle_spinbox.value()
         upper_angle_threshold = self.max_angle_spinbox.value()
-
-        # Define the projection transformers
-        wgs84 = pyproj.CRS('EPSG:4326')  # WGS84 coordinate system
-        original_crs = pyproj.CRS(gdf.crs)  # Original CRS of the GeoDataFrame
-        transformer = pyproj.Transformer.from_crs(original_crs, wgs84, always_xy=True)
-
         for idx, geom in enumerate(gdf.geometry):
             if geom is None:
-                continue  # Skip empty geometries
-            
-            # Convert MultiLineString into individual LineStrings
+                continue
             lines = [geom] if isinstance(geom, LineString) else list(geom.geoms) if isinstance(geom, MultiLineString) else []
-            
             for line in lines:
                 if len(line.coords) < 3:
-                    continue  # Skip lines that are too short for angle calculation
-                
+                    continue
                 coords = np.array(line.coords)
-
-                # Check for sharp turns
                 for i in range(1, len(coords) - 1):
-                    # Get three consecutive points
                     p1, p2, p3 = coords[i - 1], coords[i], coords[i + 1]
-                    
-                    # Vectors forming the angle
-                    v1 = p2 - p1  # Vector from p1 to p2
-                    v2 = p3 - p2  # Vector from p2 to p3
-
-                    # Compute the dot product and cross product
+                    v1 = p1 - p2
+                    v2 = p3 - p2
                     dot_product = np.dot(v1, v2)
-                    cross_product = np.cross(v1, v2)
-
-                    # Compute the turning angle (in radians)
-                    angle_radians = np.arctan2(np.abs(cross_product), dot_product)
-                    
-                    # Convert to degrees
-                    angle_degrees = np.degrees(angle_radians)
-                    
-                    # Compute the inner angle (180 - turning angle)
-                    inner_angle = 180 - angle_degrees
-
-                    # Check if the inner angle is outside the acceptable range
-                    if lower_angle_threshold <= inner_angle <= upper_angle_threshold:
-                        issue_indices.add(idx)
-                        # Transform the coordinates to WGS84
-                        lon, lat = transformer.transform(p2[0], p2[1])
-                        issue_details.append((idx, "Sharp Turn", round(inner_angle, 2), lat, lon))
-
-                # Check for self-intersections
-                if not line.is_simple:
-                    issue_indices.add(idx)
-                    issue_details.append((idx, "Self-Intersection", None))
-
-        if issue_indices:
-            return gdf.iloc[list(issue_indices)], issue_details
-        return None, None
-
-    def check_sharp_turns_self_intersections(self,gdf, lower_angle_threshold=15, upper_angle_threshold=30):
-        """Find sharp turns and self-intersections in line features.
-        
-        Args:
-            gdf: GeoDataFrame containing line geometries.
-            lower_angle_threshold: Minimum acceptable inner angle (in degrees).
-            upper_angle_threshold: Maximum acceptable inner angle (in degrees).
-        
-        Returns:
-            A tuple containing:
-            - A GeoDataFrame with features that have issues.
-            - A list of tuples with details about the issues (index, issue type, inner angle, x, y).
-        """
-        gdf = gdf.copy()
-        #gdf = self.validate_geodataframe(gdf)
-        issue_indices = set()
-        issue_details = []
-        lower_angle_threshold = self.min_angle_spinbox.value()
-        upper_angle_threshold = self.max_angle_spinbox.value()
-
-        for idx, geom in enumerate(gdf.geometry):
-            if geom is None:
-                continue  # Skip empty geometries
-            
-            # Convert MultiLineString into individual LineStrings
-            lines = [geom] if isinstance(geom, LineString) else list(geom.geoms) if isinstance(geom, MultiLineString) else []
-            
-            for line in lines:
-                if len(line.coords) < 3:
-                    continue  # Skip lines that are too short for angle calculation
-                
-                coords = np.array(line.coords)
-
-                # Check for sharp turns
-                for i in range(1, len(coords) - 1):
-                    # Get three consecutive points
-                    p1, p2, p3 = coords[i - 1], coords[i], coords[i + 1]
-                    
-                    # Vectors forming the angle
-                    v1 = p1 - p2  # Vector from p2 to p1
-                    v2 = p3 - p2  # Vector from p2 to p3
-
-                    # Compute the dot product and cross product
-                    dot_product = np.dot(v1, v2)
-                    cross_product = np.linalg.norm(np.cross(v1, v2))  # Ensure cross product is a scalar
-
-                    # Compute the turning angle (in radians)
+                    cross_product = np.linalg.norm(np.cross(v1, v2))
                     angle_radians = np.arctan2(cross_product, dot_product)
-                    
-                    # Convert to degrees
                     angle_degrees = np.degrees(angle_radians)
-                    
-    
-
-                    # Flag if the inner angle is too sharp
                     if lower_angle_threshold <= angle_degrees <= upper_angle_threshold:
                         issue_indices.add(idx)
-                        issue_details.append((idx, "Sharp Turn", round(angle_degrees, 2), p2[0], p2[1]))  # Coordinates in original CRS
-
-                # Check for self-intersections
-                # Check for self-intersections
+                        issue_details.append((idx, "Sharp Turn", round(angle_degrees, 2), p2[0], p2[1]))
                 if not line.is_simple:
-                    # Compute self-intersections
                     intersections = line.intersection(line)
-                    if intersections.geom_type == "Point":  # Single intersection
+                    if intersections.geom_type == "Point":
                         issue_indices.add(idx)
                         issue_details.append((idx, "Self-Intersection", None, intersections.x, intersections.y))
-                    elif intersections.geom_type == "MultiPoint":  # Multiple intersections
+                    elif intersections.geom_type == "MultiPoint":
                         for pt in intersections.geoms:
                             issue_indices.add(idx)
                             issue_details.append((idx, "Self-Intersection", None, pt.x, pt.y))
-
-
         if issue_indices:
             return gdf.iloc[list(issue_indices)], issue_details
         return None, None
 
-
     def check_short_linear_features(self, gdf):
-        """
-        Identify linear features shorter than the specified length threshold.
-        
-        Args:
-            gdf (GeoDataFrame): The input GeoDataFrame.
-        
-        Returns:
-            GeoDataFrame: A GeoDataFrame containing features shorter than the threshold.
-            list: A list of tuples containing (feature_id, length) for short features.
-        """
         try:
-            gdf = self.validate_geodataframe(gdf)  # Ensure valid GeoDataFrame
+            gdf = self.validate_geodataframe(gdf)
             length_threshold = self.min_length_spinbox.value()
-
-            # Reproject to EPSG:21037 for accurate length calculation
             if gdf.crs != "EPSG:21037":
-                try:
-                    print("Reprojecting to EPSG:21037 (Arc 1960 / UTM zone 37N) for accurate length calculation...")
-                    gdf = gdf.to_crs(epsg=21037)
-                except Exception as e:
-                    print(f"Error during CRS conversion: {e}")
-                    return None, None
-
+                print("Reprojecting to EPSG:21037 for accurate length calculation...")
+                gdf = gdf.to_crs(epsg=21037)
             short_features = []
-
             for idx, geom in gdf.geometry.items():
                 try:
                     if isinstance(geom, (LineString, MultiLineString)):
-                        length = geom.length  # Length in meters
+                        length = geom.length
                         if length < length_threshold:
                             short_features.append((gdf.iloc[idx]["feature_id"], length))
                 except Exception as e:
                     print(f"Error processing geometry at index {idx}: {e}")
-
             if short_features:
                 short_indices = [idx for idx, _ in short_features]
                 return gdf.iloc[short_indices], short_features
-
         except Exception as e:
             print(f"An error occurred: {e}")
-
         return None, None
 
+    def check_attributes(self, gdf, layer_name, unmatched_layers):
+        """Validate attributes of a GeoDataFrame against specifications in the Excel file using fuzzy matching."""
+        if not self.excel_file:
+            self.log_message(f"No Excel file available for attribute validation of layer {layer_name}.")
+            unmatched_layers.append(layer_name)
+            return None, None
+        try:
+            xl = pd.ExcelFile(self.excel_file, engine='openpyxl')
+            sheet_names = xl.sheet_names
+            match = process.extractOne(layer_name, sheet_names, score_cutoff=70)
+            if not match:
+                self.log_message(f"No matching sheet found for layer {layer_name} (similarity score below 70).")
+                unmatched_layers.append(layer_name)
+                return None, None
+            matched_sheet, score = match[0], match[1]
+            self.log_message(f"Matched layer {layer_name} to sheet {matched_sheet} with similarity score {score}")
+            specs_df = pd.read_excel(self.excel_file, sheet_name=matched_sheet, engine='openpyxl')
+            required_cols = ['Attribute', 'Type']
+            if not all(col in specs_df.columns for col in required_cols):
+                self.log_message(f"Sheet {matched_sheet} missing required columns: {required_cols}")
+                return None, None
+        except Exception as e:
+            self.log_message(f"Error reading Excel sheet for layer {layer_name}: {str(e)}")
+            return None, None
+        issue_indices = set()
+        issue_details = []
+        type_mapping = {
+            "String": "object",
+            "text": "object",
+            "Integer": "int64",
+            "Float": "float64",
+            "decimal": "float64",
+            "Boolean": "bool",
+            "Date": "datetime64[ns]",
+            "Array": "object"
+        }
+        geometry_types = ["point", "linestring", "polygon"]
+        gdf_columns = [col for col in gdf.columns if col != "geometry"]
+        required_fields = specs_df['Attribute'].tolist()
+        missing_fields = [field for field in required_fields if field not in gdf_columns and specs_df[specs_df['Attribute'] == field]['Type'].iloc[0].lower() not in geometry_types]
+        if missing_fields:
+            issue_details.append((-1, "Missing Fields", f"Required fields missing: {', '.join(missing_fields)}", None, None))
+        for _, spec in specs_df.iterrows():
+            field = spec['Attribute']
+            expected_type = spec['Type']
+            max_length = spec.get('LEN', np.nan)
+            valid_values = spec.get('Options', '')
+            if expected_type.lower() in geometry_types:
+                continue
+            if field not in gdf_columns:
+                issue_details.append((-1, "Missing Field", f"Field {field} is required but missing", None, None))
+                continue
+            actual_type = str(gdf[field].dtype)
+            expected_pandas_type = type_mapping.get(expected_type, expected_type)
+            if actual_type != expected_pandas_type:
+                issue_details.append((-1, "Incorrect Data Type", f"Field {field} has type {actual_type}, expected {expected_pandas_type}", None, None))
+            if gdf[field].isna().any():
+                na_indices = gdf[gdf[field].isna()].index.tolist()
+                for idx in na_indices:
+                    issue_indices.add(idx)
+                    issue_details.append((idx, "Missing Value", f"Field {field} is required but has missing value", None, None))
+            if valid_values and isinstance(valid_values, str):
+                valid_values = [v.strip() for v in valid_values.split(',') if v.strip()]
+                invalid_mask = ~gdf[field].isin(valid_values) & gdf[field].notna()
+                if invalid_mask.any():
+                    invalid_indices = gdf[invalid_mask].index.tolist()
+                    for idx in invalid_indices:
+                        issue_indices.add(idx)
+                        value = gdf.loc[idx, field]
+                        issue_details.append((idx, "Invalid Value", f"Field {field} has invalid value {value}, expected one of {valid_values}", None, None))
+            if not pd.isna(max_length) and expected_type.lower() in ["string", "text"]:
+                long_values = gdf[field].str.len() > max_length
+                if long_values.any():
+                    long_indices = gdf[long_values].index.tolist()
+                    for idx in long_indices:
+                        issue_indices.add(idx)
+                        value = gdf.loc[idx, field]
+                        issue_details.append((idx, "Exceeds Max Length", f"Field {field} value {value} exceeds max length {max_length}", None, None))
+        if issue_indices:
+            return gdf.loc[list(issue_indices)], issue_details
+        return None, issue_details
 
-    def generate_summary_pdf(self, output_dir, layer_summary, total_layers, total_features):
-        """Generate a PDF summary report for the database with a table format."""
-        pdf =  FPDF(orientation="L", unit="mm", format="A4")
+    def generate_summary_pdf(self, output_dir, layer_summary, total_layers, total_features, unmatched_layers):
+        pdf = FPDF(orientation="L", unit="mm", format="A4")
         pdf.add_page()
         pdf.set_font("Arial", size=12)
         
@@ -628,7 +455,7 @@ class ProcessGDBDialog(QDialog):
         pdf.cell(40, 10, "Overlaps", border=1, align="C")
         pdf.cell(40, 10, "Line Issues", border=1, align="C")
         pdf.cell(40, 10, "Short Lines", border=1, align="C")
-
+        pdf.cell(40, 10, "Attribute Issues", border=1, align="C")
         pdf.ln()
         
         # Table rows
@@ -639,199 +466,161 @@ class ProcessGDBDialog(QDialog):
             pdf.cell(40, 10, str(summary["overlaps"]), border=1, align="C")
             pdf.cell(40, 10, str(summary["line_issues"]), border=1, align="C")
             pdf.cell(40, 10, str(summary["short_lines"]), border=1, align="C")
-
+            pdf.cell(40, 10, str(summary["attribute_issues"]), border=1, align="C")
             pdf.ln()
+        
+        # Add section for missing or unmatched layers
+        pdf.ln(10)
+        pdf.set_font("Arial", "B", 14)
+        pdf.cell(200, 10, txt="Layers Missing or Unmatched in Dictionary", ln=True)
+        pdf.set_font("Arial", size=12)
+        if unmatched_layers:
+            for layer in sorted(unmatched_layers):  # Sort for consistent output
+                pdf.cell(200, 10, txt=f"- {layer}", ln=True)
+        else:
+            pdf.cell(200, 10, txt="All layers found in dictionary and matched.", ln=True)
         
         # Save the PDF
         pdf_file = os.path.join(output_dir, "database_summary_report.pdf")
         pdf.output(pdf_file)
         print(f"Summary report saved to {pdf_file}")
-         # Update the PDF link label
-        self.pdf_link_label.setText(f"<a href='file:///{pdf_file}'>Quality Assessment Report</a>")
-        self.pdf_link_label.show()  # Show the link
         
-
+        # Update the PDF link label
+        self.pdf_link_label.setText(f"<a href='file:///{pdf_file}'>Quality Assessment Report</a>")
+        self.pdf_link_label.show()
+        
         # Update the folder link label
         self.folder_link_label.setText(f"<a href='file:///{output_dir}'>Open Output Folder</a>")
-        self.folder_link_label.show()  # Show the folder link
-        
-
+        self.folder_link_label.show()
 
     def run_all_checks(self):
-        """Run all checks sequentially."""
         try:
-
             selected_layers = self.get_selected_layers()
             if not selected_layers:
                 QMessageBox.warning(self, "No Layers Selected", "Please select at least one layer to process.")
                 return
-
-            # Initialize progress bar and label
             self.progress_bar.show()
             self.progress_label.show()
-            self.progress_bar.setValue(0)  # Reset progress bar
-
-
-
-
-
+            self.progress_bar.setValue(0)
             os.makedirs(self.output_folder, exist_ok=True)
             layer_summary = {}
             total_features = 0
+            unmatched_layers = []
 
             with fiona.Env():
-                #layers = fiona.listlayers(self.gdb_path)
                 total_layers = len(selected_layers)
                 self.log_message(f"Total Number of selected layers: {total_layers}")
-
-                # Set progress bar range based on total layers
                 self.progress_bar.setRange(0, total_layers)
 
                 for i, layer in enumerate(selected_layers):
-                    # Update progress bar and label
                     self.progress_bar.setValue(i + 1)
                     self.progress_label.setText(f"Processing Layer {i + 1} of {total_layers}: {layer}")
-                    QApplication.processEvents()  # Keep the UI responsive
-
+                    QApplication.processEvents()
                     self.log_message(f"Processing Layer: {layer}")
                     gdf = gpd.read_file(self.gdb_path, layer=layer)
                     gdf = self.validate_geodataframe(gdf)
                     total_features += len(gdf)
-
-                    # Add a unique feature_id to each feature
                     gdf["feature_id"] = range(1, len(gdf) + 1)
-
-                    # Convert timezone-aware datetime columns to timezone-naive
                     gdf = self.make_timezone_naive(gdf)
-
-                    # Perform checks
                     duplicate_geoms, duplicate_pairs = self.check_duplicate_geometries(gdf)
                     duplicate_attrs = self.check_duplicate_attributes(gdf)
                     overlapping_polys, overlap_pairs = self.check_overlapping_polygons(gdf)
                     line_issues, line_issue_details = self.check_sharp_turns_self_intersections(gdf)
                     short_lines, short_line_details = self.check_short_linear_features(gdf)
-
-                    # Summarize issues for the layer
+                    attribute_issues, attribute_issue_details = self.check_attributes(gdf, layer, unmatched_layers)
                     layer_summary[layer] = {
                         "duplicates": len(duplicate_pairs) if duplicate_pairs else 0,
                         "overlaps": len(overlap_pairs) if overlap_pairs else 0,
                         "line_issues": len(line_issue_details) if line_issue_details else 0,
                         "short_lines": len(short_line_details) if short_line_details else 0,
+                        "attribute_issues": len(attribute_issue_details) if attribute_issue_details else 0
                     }
-
-                    # Save rows with issues (existing code)
-                    # ...
-                    # Save rows with issues
                     if duplicate_geoms is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_duplicate_geometries.gpkg")
                         duplicate_geoms.to_file(issue_file, driver="GPKG")
                         print(f"  - Duplicate geometries saved to {issue_file}")
-                        
-                        # Save detailed Excel for duplicate pairs and all features
-                    if duplicate_pairs:
-                        # Convert duplicate pairs to DataFrame
-                        duplicate_pairs_df = pd.DataFrame(duplicate_pairs, columns=["Feature1", "Feature2"])
-                        
-                        # Ensure unique duplicate pairs by sorting Feature1 and Feature2 in each row
-                        duplicate_pairs_df[["Feature1", "Feature2"]] = np.sort(duplicate_pairs_df[["Feature1", "Feature2"]], axis=1)
-                        
-                        # Drop duplicate rows to remove reversed duplicates
-                        duplicate_pairs_df = duplicate_pairs_df.drop_duplicates()
-
-                        # Select all features excluding geometry
-                        all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
-
-                        # Define output Excel file path
-                        excel_file = os.path.join(self.output_folder, f"{layer}_duplicates.xlsx")
-                        
-                        # Write data to Excel
-                        with pd.ExcelWriter(excel_file) as writer:
-                            duplicate_pairs_df.to_excel(writer, sheet_name="Duplicate Pairs", index=False)
-                            all_features_df.to_excel(writer, sheet_name="All Features", index=False)
-
-                        print(f"  - Unique duplicate pairs and all features saved to {excel_file}")
-
-                                
+                        if duplicate_pairs:
+                            duplicate_pairs_df = pd.DataFrame(duplicate_pairs, columns=["Feature1", "Feature2"])
+                            duplicate_pairs_df[["Feature1", "Feature2"]] = np.sort(duplicate_pairs_df[["Feature1", "Feature2"]], axis=1)
+                            duplicate_pairs_df = duplicate_pairs_df.drop_duplicates()
+                            all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
+                            excel_file = os.path.join(self.output_folder, f"{layer}_duplicates.xlsx")
+                            with pd.ExcelWriter(excel_file) as writer:
+                                duplicate_pairs_df.to_excel(writer, sheet_name="Duplicate Pairs", index=False)
+                                all_features_df.to_excel(writer, sheet_name="All Features", index=False)
+                            print(f"  - Unique duplicate pairs and all features saved to {excel_file}")
                     if duplicate_attrs is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_duplicate_attributes.gpkg")
                         duplicate_attrs.to_file(issue_file, driver="GPKG")
                         print(f"  - Duplicate attributes saved to {issue_file}")
-        
-                    
                     if overlapping_polys is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_overlapping_polygons.gpkg")
                         overlapping_polys.to_file(issue_file, driver="GPKG")
                         print(f"  - Overlapping polygons saved to {issue_file}")
-                        
                         if overlap_pairs:
-                            # Create a DataFrame for overlapping pairs with overlap area
                             overlap_pairs_df = pd.DataFrame(overlap_pairs, columns=["Feature1", "Feature2", "Overlap Area (m²)"])
-                            
-                            # Create a DataFrame for all features with feature_id
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
-                            
-                            # Save to Excel
                             excel_file = os.path.join(self.output_folder, f"{layer}_overlaps.xlsx")
                             with pd.ExcelWriter(excel_file) as writer:
                                 overlap_pairs_df.to_excel(writer, sheet_name="Overlap Pairs", index=False)
                                 all_features_df.to_excel(writer, sheet_name="All Features", index=False)
                             print(f"  - Overlapping pairs and all features saved to {excel_file}")
-
-                            
                     if line_issues is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_line_issues.gpkg")
                         line_issues.to_file(issue_file, driver="GPKG")
                         print(f"  - Line issues saved to {issue_file}")
-
                         if line_issue_details:
-                            # Convert issue details to DataFrame
-                            line_issue_details_df = pd.DataFrame(line_issue_details, columns=["FeatureIndex", "IssueType", "Angle","x","y"])
-
-                            # Merge feature_id from gdf using index
+                            line_issue_details_df = pd.DataFrame(line_issue_details, columns=["FeatureIndex", "IssueType", "Angle", "x", "y"])
                             line_issue_details_df["feature_id"] = gdf.iloc[line_issue_details_df["FeatureIndex"]]["feature_id"].values
-
-                            # Reorder columns to place feature_id first
-                            line_issue_details_df = line_issue_details_df[["feature_id", "FeatureIndex", "IssueType", "Angle","x","y"]]
-
-                            # Create DataFrame for all features excluding geometry
+                            line_issue_details_df = line_issue_details_df[["feature_id", "FeatureIndex", "IssueType", "Angle", "x", "y"]]
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
-
-                            # Save to Excel
                             excel_file = os.path.join(self.output_folder, f"{layer}_line_issues.xlsx")
                             with pd.ExcelWriter(excel_file) as writer:
                                 line_issue_details_df.to_excel(writer, sheet_name="Line Issues", index=False)
                                 all_features_df.to_excel(writer, sheet_name="All Features", index=False)
                             print(f"  - Line issues and all features saved to {excel_file}")
-        
                     if short_lines is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_short_lines.gpkg")
                         short_lines.to_file(issue_file, driver="GPKG")
                         print(f"  - Short linear features saved to {issue_file}")
-                        
                         if short_line_details:
-                            # Create a DataFrame for short linear features
                             short_line_details_df = pd.DataFrame(short_line_details, columns=["FeatureID", "Length (m)"])
-                            
-                            # Create a DataFrame for all features with feature_id
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
-                            
-                            # Save to Excel
                             excel_file = os.path.join(self.output_folder, f"{layer}_short_lines.xlsx")
                             with pd.ExcelWriter(excel_file) as writer:
                                 short_line_details_df.to_excel(writer, sheet_name="Short Lines", index=False)
                                 all_features_df.to_excel(writer, sheet_name="All Features", index=False)
                             print(f"  - Short linear features and all features saved to {excel_file}")
-
-            # Generate summary PDF
-            self.generate_summary_pdf(self.output_folder, layer_summary, total_layers, total_features)
-
-            # Hide progress bar and label after completion
+                    if attribute_issues is not None:
+                        issue_file = os.path.join(self.output_folder, f"{layer}_attribute_issues.gpkg")
+                        attribute_issues.to_file(issue_file, driver="GPKG")
+                        print(f"  - Attribute issues saved to {issue_file}")
+                        if attribute_issue_details:
+                            attribute_issue_details_df = pd.DataFrame(
+                                attribute_issue_details,
+                                columns=["FeatureIndex", "IssueType", "Description", "x", "y"]
+                            )
+                            attribute_issue_details_df["feature_id"] = attribute_issue_details_df["FeatureIndex"].apply(
+                                lambda x: gdf.iloc[x]["feature_id"] if x >= 0 else None
+                            )
+                            attribute_issue_details_df = attribute_issue_details_df[["feature_id", "FeatureIndex", "IssueType", "Description", "x", "y"]]
+                            all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
+                            excel_file = os.path.join(self.output_folder, f"{layer}_attribute_issues.xlsx")
+                            with pd.ExcelWriter(excel_file) as writer:
+                                attribute_issue_details_df.to_excel(writer, sheet_name="Attribute Issues", index=False)
+                                all_features_df.to_excel(writer, sheet_name="All Features", index=False)
+                            print(f"  - Attribute issues and all features saved to {excel_file}")
+            self.generate_summary_pdf(self.output_folder, layer_summary, total_layers, total_features, unmatched_layers)
             self.progress_bar.hide()
             self.progress_label.hide()
-
             QMessageBox.information(self, "Run All Checks", "All checks have been completed.")
         except Exception as e:
-            # Handle errors and update progress bar
             self.progress_label.setText(f"Error: {str(e)}")
             self.progress_bar.hide()
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    dialog = ProcessGDBDialog()
+    dialog.show()
+    sys.exit(app.exec_())
