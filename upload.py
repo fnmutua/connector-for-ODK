@@ -6,12 +6,35 @@ from PyQt5.QtWidgets import (QDialog, QProgressBar, QVBoxLayout, QPushButton, QL
                              QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, 
                              QTableWidgetItem, QSizePolicy)
 from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject
+from PyQt5.QtCore import QThread, pyqtSignal, QObject, QTimer
 from fuzzywuzzy import fuzz
 import json
 import geopandas as gpd
 import pandas as pd
 from qgis.core import QgsVectorLayer, QgsProject
 import shortuuid
+from shapely.geometry import mapping, shape
+try:
+    from shapely import force_2d
+except ImportError:
+    def force_2d(geom):
+        """Fallback to convert geometry to 2D by dropping Z coordinate."""
+        if geom is None:
+            return None
+        geom_dict = mapping(geom)
+        if geom_dict["type"] == "Point":
+            geom_dict["coordinates"] = geom_dict["coordinates"][:2]
+        elif geom_dict["type"] in ["LineString", "LinearRing"]:
+            geom_dict["coordinates"] = [coord[:2] for coord in geom_dict["coordinates"]]
+        elif geom_dict["type"] == "Polygon":
+            geom_dict["coordinates"] = [[coord[:2] for coord in ring] for ring in geom_dict["coordinates"]]
+        elif geom_dict["type"] in ["MultiPoint", "MultiLineString", "MultiPolygon"]:
+            geom_dict["coordinates"] = [
+                force_2d(shape(sub_geom)).__geo_interface__["coordinates"]
+                for sub_geom in geom_dict["coordinates"]
+            ]
+        return shape(geom_dict)
+from rapidfuzz import process, fuzz
 
 class Worker(QObject):
     """Worker object to run fetch_pcode_data in a background thread."""
@@ -47,7 +70,6 @@ class Worker(QObject):
             }
 
             if use_geometry_lookup:
-                # Batch geometry-based lookup
                 geometries = [row["geojson"] for _, row in self.gdf.iterrows() if row["geojson"] is not None]
                 if not geometries:
                     self.log.emit("No valid geometries found for intersection.")
@@ -55,7 +77,6 @@ class Worker(QObject):
                     self.finished.emit()
                     return
 
-                # No progress signals for geometry lookup (handled by indeterminate progress bar)
                 try:
                     response = requests.post(
                         f"{self.url}/api/v1/data/intersect",
@@ -71,7 +92,6 @@ class Worker(QObject):
                         results = entity_data.get("data", [])
                         self.log.emit(f"Received {entity_data.get('count', 0)} intersecting records from batch query.")
 
-                        # Map results to features using geometry_index
                         index_to_row = {i: row_idx for i, (row_idx, _) in enumerate(self.gdf.iterrows()) if self.gdf.loc[row_idx, "geojson"] is not None}
                         for result in results:
                             geometry_index = result.get("geometry_index")
@@ -79,7 +99,7 @@ class Worker(QObject):
                             if geometry_index in index_to_row:
                                 row_idx = index_to_row[geometry_index]
                                 if records:
-                                    record = records[0]  # Take first record if multiple
+                                    record = records[0]
                                     if record.get("id"):
                                         id_key = None
                                         parent_entity_lower = self.parent_entity_name.lower()
@@ -113,7 +133,6 @@ class Worker(QObject):
                 except Exception as e:
                     self.log.emit(f"Error fetching batch geometry data: {str(e)}")
             else:
-                # Pcode-based lookup (individual requests)
                 total_features = sum(1 for _ in self.gdf.iterrows())
                 for idx, (row_idx, row) in enumerate(self.gdf.iterrows()):
                     pcode = row["pcode"] if "pcode" in row else None
@@ -159,7 +178,6 @@ class Worker(QObject):
                     except Exception as e:
                         self.log.emit(f"Error fetching entity data for pcode {pcode}: {str(e)}")
 
-                    # Emit progress for pcode lookup
                     progress = int((idx + 1) / total_features * 100)
                     self.progress.emit(progress)
 
@@ -173,6 +191,57 @@ class Worker(QObject):
 
         except Exception as e:
             self.log.emit(f"Error fetching pcode data: {str(e)}")
+            self.finished.emit()
+
+class FieldMatchingWorker(QObject):
+    """Worker object to run field matching in a background thread."""
+    progress = pyqtSignal(int)  # Emit progress percentage
+    log = pyqtSignal(str)  # Emit log messages
+    finished = pyqtSignal()  # Signal when done
+    result = pyqtSignal(dict, list)  # Emit field_mapping and table_data
+
+    def __init__(self, layer, entity, pcode_fields):
+        super().__init__()
+        self.layer = layer
+        self.entity = entity
+        self.pcode_fields = pcode_fields
+
+    def run(self):
+        """Perform field matching in the background."""
+        try:
+            layer_fields = [f.name() for f in self.layer.fields()]
+            fields_to_match = layer_fields + self.pcode_fields
+            api_fields = [attr["name"] for attr in self.entity.get("attributes", [])]
+            field_mapping = {}
+            table_data = []
+
+            total_fields = len(fields_to_match)
+            for idx, field in enumerate(fields_to_match):
+                match = process.extractOne(
+                    field,
+                    api_fields,
+                    scorer=fuzz.ratio,
+                    score_cutoff=70
+                )
+                if match:
+                    api_field, score, _ = match
+                    field_mapping[field] = api_field
+                    table_data.append((field, api_field, str(int(score))))
+                else:
+                    table_data.append((field, "", "-"))
+
+                # Emit progress with slight delay to ensure UI updates
+                progress = int((idx + 1) / total_fields * 100)
+                self.progress.emit(min(progress, 99))  # Cap at 99% until completion
+                QThread.msleep(50)  # Small delay to prevent UI overload
+
+            self.log.emit("Field matching completed in background thread.")
+            self.result.emit(field_mapping, table_data)
+            self.progress.emit(100)  # Signal completion
+            self.finished.emit()
+
+        except Exception as e:
+            self.log.emit(f"Error in field matching: {str(e)}")
             self.finished.emit()
 
 class KesMISDialog(QDialog):
@@ -322,11 +391,12 @@ class KesMISDialog(QDialog):
         # Thread for background processing
         self.thread = QThread()
         self.worker = None
+        self.field_matching_worker = None
 
     def clear_log(self):
         """Clear all messages in the log window."""
         self.log_textedit.clear()
-        
+
     def _convert_to_serializable(self, value):
         """Convert QVariant and other non-serializable types to JSON-serializable types."""
         if isinstance(value, QVariant):
@@ -350,7 +420,6 @@ class KesMISDialog(QDialog):
         self.mapping_table.setRowCount(0)
         self.submit_button.setEnabled(False)
         
-        # Create and cache GeoDataFrame
         layer = self.layer_combo.currentData()
         if layer:
             try:
@@ -369,7 +438,6 @@ class KesMISDialog(QDialog):
                 if "code" not in self.gdf.columns:
                     self.gdf["code"] = [shortuuid.ShortUUID().random(length=6) for _ in range(len(self.gdf))]
                     self.log_message("Generated unique codes for all features.")
-                # Pre-serialize geometries to GeoJSON
                 self.gdf["geojson"] = self.gdf.geometry.apply(lambda geom: self._convert_to_serializable(geom.__geo_interface__) if geom else None)
                 self.log_message("Cached GeoDataFrame for new layer.")
             except Exception as e:
@@ -383,7 +451,6 @@ class KesMISDialog(QDialog):
         
         self.log_message("Cleared pcode data and field mappings due to layer change.")
         
-        # Re-fetch parent IDs if a parent entity is selected
         if self.parent_combo.currentText():
             self.start_fetch_pcode_data()
 
@@ -392,28 +459,24 @@ class KesMISDialog(QDialog):
         if not self.layer_combo.currentData() or not self.parent_combo.currentText():
             return
 
-        # Clear previous data to prevent stale references
         self.pcode_entity_data = {}
         self.valid_feature_indices = []
         self.log_message(f"Starting pcode data fetch for parent entity '{self.parent_combo.currentText()}'")
 
-        # Disable UI elements during processing
         self.layer_combo.setEnabled(False)
         self.parent_combo.setEnabled(False)
         self.entity_combo.setEnabled(False)
         self.submit_button.setEnabled(False)
         self.progress_bar.setVisible(True)
 
-        # Set indeterminate mode for geometry lookup, percentage for pcode lookup
         layer_fields = [f.name() for f in self.layer_combo.currentData().fields()]
         use_geometry_lookup = 'pcode' not in layer_fields
         if use_geometry_lookup:
-            self.progress_bar.setRange(0, 0)  # Indeterminate mode (animated)
+            self.progress_bar.setRange(0, 0)
         else:
-            self.progress_bar.setRange(0, 100)  # Percentage mode for pcode lookup
+            self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
 
-        # Create worker and move to thread
         self.worker = Worker(
             self.layer_combo.currentData(),
             self.parent_combo.currentText(),
@@ -423,13 +486,11 @@ class KesMISDialog(QDialog):
         self.worker.gdf = self.gdf
         self.worker.moveToThread(self.thread)
 
-        # Connect signals
         self.worker.progress.connect(self.progress_bar.setValue)
         self.worker.log.connect(self.log_message)
         self.worker.result.connect(self.on_fetch_pcode_data_finished)
         self.worker.finished.connect(self.on_worker_finished)
 
-        # Start thread
         self.thread.started.connect(self.worker.run)
         self.thread.start()
 
@@ -448,7 +509,7 @@ class KesMISDialog(QDialog):
         self.parent_combo.setEnabled(True)
         self.entity_combo.setEnabled(True)
         self.progress_bar.setVisible(False)
-        self.progress_bar.setRange(0, 100)  # Reset to percentage mode
+        self.progress_bar.setRange(0, 100)
         self.thread.quit()
         self.thread.wait()
         self.worker = None
@@ -541,70 +602,106 @@ class KesMISDialog(QDialog):
         except Exception as e:
             self.log_message(f"Error fetching entities: {str(e)}")
 
+  
     def match_fields(self):
-        """Perform one-to-one fuzzy matching with minimum 70% score, allowing unmatched fields."""
+        """Start field matching in a background thread."""
         try:
             if not self.layer_combo.currentData() or not self.entity_combo.currentData():
+                self.log_message("No layer or entity selected for field matching.")
                 return
 
             layer = self.layer_combo.currentData()
             entity = self.entity_combo.currentData()
-            
-            layer_fields = [f.name() for f in layer.fields()]
-            fields_to_match = layer_fields + self.pcode_fields
-            api_fields = [attr["name"] for attr in entity.get("attributes", [])]
-            
-            self.field_mapping = {}
-            self.mapping_table.setRowCount(0)
-            
-            match_scores = []
-            for field in fields_to_match:
-                for api_field in api_fields:
-                    score = fuzz.ratio(field.lower(), api_field.lower())
-                    if score >= 70:
-                        match_scores.append((score, field, api_field))
-            
-            match_scores.sort(reverse=True)
-            used_fields = set()
-            used_api_fields = set()
-            
-            for score, field, api_field in match_scores:
-                if field not in used_fields and api_field not in used_api_fields:
-                    self.field_mapping[field] = api_field
-                    used_fields.add(field)
-                    used_api_fields.add(api_field)
-            
-            for field in fields_to_match:
-                row = self.mapping_table.rowCount()
-                self.mapping_table.insertRow(row)
-                
-                self.mapping_table.setItem(row, 0, QTableWidgetItem(field))
-                
-                combo = QComboBox()
-                combo.addItem("")
-                combo.addItems(api_fields)
-                
-                matched_api_field = self.field_mapping.get(field, "")
-                combo.setCurrentText(matched_api_field)
-                
-                combo.currentTextChanged.connect(lambda text, f=field: self.update_mapping(f, text))
-                self.mapping_table.setCellWidget(row, 1, combo)
-                
-                score = "-"
-                if matched_api_field:
-                    score = str(max(fuzz.ratio(field.lower(), af.lower()) for af in api_fields if af == matched_api_field))
-                self.mapping_table.setItem(row, 2, QTableWidgetItem(score))
 
-            self.mapping_table.resizeColumnsToContents()
-            self.submit_button.setEnabled(True)
-            self.log_message("Field matching completed")
+            self.layer_combo.setEnabled(False)
+            self.parent_combo.setEnabled(False)
+            self.entity_combo.setEnabled(False)
+            self.submit_button.setEnabled(False)
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+
+            # Ensure previous worker is cleaned up
+            if self.field_matching_worker:
+                self.field_matching_worker.deleteLater()
+                self.thread.quit()
+                self.thread.wait()
+
+            self.field_matching_worker = FieldMatchingWorker(
+                layer,
+                entity,
+                self.pcode_fields
+            )
+            self.field_matching_worker.moveToThread(self.thread)
+
+            self.field_matching_worker.progress.connect(self.progress_bar.setValue)
+            self.field_matching_worker.log.connect(self.log_message)
+            self.field_matching_worker.result.connect(self.on_field_matching_finished)
+            self.field_matching_worker.finished.connect(self.on_field_matching_worker_finished)
+
+            self.thread.started.connect(self.field_matching_worker.run)
+            self.thread.start()
+
         except Exception as e:
-            self.log_message(f"Error in field matching: {str(e)}")
+            self.log_message(f"Error starting field matching: {str(e)}")
+            self.on_field_matching_worker_finished()
+
+    def on_field_matching_finished(self, field_mapping, table_data):
+        """Handle results from field matching worker."""
+        self.field_mapping = field_mapping
+        self.mapping_table.setRowCount(0)
+        api_fields = [attr["name"] for attr in self.entity_combo.currentData().get("attributes", [])]
+
+        for field, matched_api_field, score in table_data:
+            row = self.mapping_table.rowCount()
+            self.mapping_table.insertRow(row)
+            self.mapping_table.setItem(row, 0, QTableWidgetItem(field))
+
+            combo = QComboBox()
+            combo.addItem("")
+            combo.addItems(api_fields)
+            combo.setCurrentText(matched_api_field)
+            combo.currentTextChanged.connect(lambda text, f=field: self.update_mapping(f, text))
+            self.mapping_table.setCellWidget(row, 1, combo)
+
+            self.mapping_table.setItem(row, 2, QTableWidgetItem(score))
+
+        self.mapping_table.resizeColumnsToContents()
+        self.submit_button.setEnabled(True)
+        self.log_message("Field mapping table updated.")
+        # Ensure progress bar reaches 100% only after table is updated
+        QTimer.singleShot(100, lambda: self.progress_bar.setValue(100))
+
+    def on_field_matching_worker_finished(self):
+        """Clean up after field matching worker finishes."""
+        self.layer_combo.setEnabled(True)
+        self.parent_combo.setEnabled(True)
+        self.entity_combo.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setValue(0)
+        self.thread.quit()
+        self.thread.wait()
+        self.field_matching_worker = None
 
     def update_mapping(self, field, api_field):
         """Update field mapping when user changes selection."""
         self.field_mapping[field] = api_field if api_field else None
         self.log_message(f"Updated mapping: {field} -> {api_field or 'None'}")
+
+    @staticmethod
+    def to_2d(geom):
+        """Convert geometry to 2D by dropping Z dimension."""
+        if geom is None:
+            return None
+        return shape(mapping(force_2d(geom)))
+
+    def sanitize_json_value(self, value):
+        """Sanitize JSON values to handle NaN and infinity."""
+        if isinstance(value, float) and (value != value or value in [float("inf"), float("-inf")]):
+            return None
+        if value is None:
+            return None
+        return value
 
     def submit_features(self):
         """Submit features to API with mapped fields and additional entity data from pcode."""
@@ -612,24 +709,28 @@ class KesMISDialog(QDialog):
             layer = self.layer_combo.currentData()
             url = self.url_input.text()
             entity = self.entity_combo.currentData()
-            
+
             if self.gdf is None or self.gdf.empty:
                 self.log_message("No valid GeoDataFrame available for submission.")
                 QMessageBox.warning(self, "No Data", "No valid layer selected or layer contains no features.")
                 return
 
-            # Disable submit button and show animated progress bar
             self.submit_button.setEnabled(False)
-            self.progress_bar.setRange(0, 0)  # Indeterminate mode (animated)
+            self.progress_bar.setRange(0, 0)
             self.progress_bar.setVisible(True)
 
-            # Drop Z dimension from all geometries in the GeoDataFrame
+            srid = layer.crs().postgisSrid()
+            self.log_message(f"Layer CRS SRID detected: {srid}")
             try:
-                self.gdf['geometry'] = self.gdf.geometry.force_2d()
-                self.log_message("Z dimension dropped from all geometries in GeoDataFrame.")
+                if self.gdf.crs is None:
+                    self.gdf.set_crs(epsg=srid, inplace=True)
+                    self.log_message("No CRS defined for GeoDataFrame. Using layer CRS.")
+                self.gdf = self.gdf.to_crs(epsg=4326)
+                self.gdf['geometry'] = self.gdf['geometry'].apply(self.to_2d)
+                self.log_message("Z dimension dropped and GeoDataFrame reprojected to EPSG:4326.")
             except Exception as e:
-                self.log_message(f"Error dropping Z dimension from geometries: {str(e)}")
-                QMessageBox.critical(self, "Geometry Error", f"Failed to drop Z dimension: {str(e)}")
+                self.log_message(f"Error reprojecting or processing geometries: {str(e)}")
+                QMessageBox.critical(self, "Geometry Error", f"Failed to reproject or process geometries: {str(e)}")
                 return
 
             features = []
@@ -660,9 +761,9 @@ class KesMISDialog(QDialog):
                 for field, api_field in self.field_mapping.items():
                     if api_field:
                         if field in row:
-                            feature[api_field] = self._convert_to_serializable(row[field])
+                            feature[api_field] = self._convert_to_serializable(self.sanitize_json_value(row[field]))
                         elif field in entity_data and entity_data.get(field) is not None:
-                            feature[api_field] = self._convert_to_serializable(entity_data.get(field))
+                            feature[api_field] = self._convert_to_serializable(self.sanitize_json_value(entity_data.get(field)))
                 
                 if hasattr(row, "geometry") and row.geometry:
                     feature["geom"] = self._convert_to_serializable(row.geometry.__geo_interface__)
@@ -726,9 +827,8 @@ class KesMISDialog(QDialog):
             self.log_message(f"Error submitting features: {str(e)}")
             QMessageBox.critical(self, "Error", str(e))
         finally:
-            # Re-enable submit button and hide progress bar
             self.submit_button.setEnabled(True)
-            self.progress_bar.setRange(0, 100)  # Reset to percentage mode
+            self.progress_bar.setRange(0, 100)
             self.progress_bar.setVisible(False)
 
     def log_message(self, message):
