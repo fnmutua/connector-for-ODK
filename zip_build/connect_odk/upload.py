@@ -605,6 +605,7 @@ class KesMISDialog(QDialog):
         """Update field mapping when user changes selection."""
         self.field_mapping[field] = api_field if api_field else None
         self.log_message(f"Updated mapping: {field} -> {api_field or 'None'}")
+ 
 
     def submit_features(self):
         """Submit features to API with mapped fields and additional entity data from pcode."""
@@ -612,7 +613,9 @@ class KesMISDialog(QDialog):
             layer = self.layer_combo.currentData()
             url = self.url_input.text()
             entity = self.entity_combo.currentData()
-            
+
+            self.log_message(self.gdf.crs)
+
             if self.gdf is None or self.gdf.empty:
                 self.log_message("No valid GeoDataFrame available for submission.")
                 QMessageBox.warning(self, "No Data", "No valid layer selected or layer contains no features.")
@@ -623,13 +626,28 @@ class KesMISDialog(QDialog):
             self.progress_bar.setRange(0, 0)  # Indeterminate mode (animated)
             self.progress_bar.setVisible(True)
 
-            # Drop Z dimension from all geometries in the GeoDataFrame
+            # Reproject GeoDataFrame to EPSG:4326
+            srid = layer.crs().postgisSrid()
+            self.log_message(f"Layer CRS SRID detected v2: {srid}")
+            self.log_message(f"gdf CRS SRID detected v2: {self.gdf.crs}")
             try:
+                if self.gdf.crs is None:
+                    
+                    self.gdf.set_crs(epsg=srid, inplace=True)
+                    self.log_message("No CRS defined for GeoDataFrame. Fixing the layer CRS.")
+                    self.log_message(f"gdf CRS SRID detected v3: {self.gdf.crs}")
+                    self.gdf = self.gdf.to_crs(epsg=4326)
+                    
+
+                else:
+                    self.log_message(f"Reprojecting GeoDataFrame from {self.gdf.crs} to EPSG:4326.")
+                    self.gdf = self.gdf.to_crs(epsg=4326)
+                # Drop Z dimension from all geometries
                 self.gdf['geometry'] = self.gdf.geometry.force_2d()
                 self.log_message("Z dimension dropped from all geometries in GeoDataFrame.")
             except Exception as e:
-                self.log_message(f"Error dropping Z dimension from geometries: {str(e)}")
-                QMessageBox.critical(self, "Geometry Error", f"Failed to drop Z dimension: {str(e)}")
+                self.log_message(f"Error reprojecting or processing geometries: {str(e)}")
+                QMessageBox.critical(self, "Geometry Error", f"Failed to reproject or process geometries: {str(e)}")
                 return
 
             features = []
