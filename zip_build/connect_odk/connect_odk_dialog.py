@@ -2,10 +2,13 @@ from PyQt5.QtWidgets import QDialog, QComboBox, QLineEdit, QPushButton, QVBoxLay
 from qgis.core import QgsVectorLayer, QgsProject
 from qgis.gui import QgsMapCanvas  # Ensure QgsMapCanvas is imported from qgis.gui
 from PyQt5.QtWidgets import QVBoxLayout, QPushButton, QHBoxLayout
-
+from qgis.core import QgsVectorLayer, QgsProject, QgsCoordinateReferenceSystem
 import requests
 
-
+from PyQt5.QtWidgets import (QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox, 
+                             QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox, 
+                             QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, 
+                             QTableWidgetItem, QSizePolicy)
 import json 
 from PyQt5.QtCore import Qt  # Add this import for Qt
 from qgis.core import QgsVectorLayer, QgsProject
@@ -31,6 +34,18 @@ from PyQt5.QtWidgets import QLabel
 from PyQt5.QtGui import QPixmap
 
 
+from PyQt5.QtWidgets import QDialog, QComboBox, QLineEdit, QPushButton, QVBoxLayout, QFormLayout, QMessageBox, QTextEdit, QProgressBar, QLabel
+from qgis.core import QgsVectorLayer, QgsProject, QgsCoordinateReferenceSystem
+from qgis.gui import QgsMapCanvas
+from PyQt5.QtCore import Qt, QTimer, QSettings
+from PyQt5.QtGui import QPixmap, QIcon
+import requests
+import json
+import csv
+from qgis.PyQt.QtWidgets import QFileDialog
+from collections import OrderedDict
+
+from datetime import datetime  # Ensure this is in imports
 
 class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
@@ -55,17 +70,17 @@ class ConnectODKDialog(QDialog):
         current_text = self.sender().text().strip()  # Get the text and strip spaces
         current_text = current_text.rstrip('/')  # Remove any trailing slashes
         self.sender().setText(current_text)  # Set the stripped text back
-
+ 
+    """Dialog to get user input for ODK Central credentials and form selection."""
 
     def __init__(self, default_url="https://collector.org", default_username="user@gmail.com", default_password="password"):
-     
         """Constructor."""
         super().__init__()
 
         self.settings = QSettings("AGS", "ODKConnect")
 
         self.setWindowTitle('Connector for ODK')
-        self.setFixedSize(800, 250)  # Adjusted size for map and form
+        self.setFixedSize(500, 400)  # Increased height for clear button
 
         # Initialize variables
         self.projects = []
@@ -79,127 +94,172 @@ class ConnectODKDialog(QDialog):
         # Create widgets
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("ODK Central URL")
-    #     #self.url_edit.setText(default_url)  # Set default URL
-    #     # self.url_edit.setText(self.settings.value("url", default_url))  # Load saved password or default value
-    #     # saved_url = self.settings.value("url", default_url).strip()  # Trim any saved value
-
-    #    # Load saved URL or use default
-    #     saved_url = self.settings.value("url", default_url).strip()  # Trim any saved value
-    #     self.url_edit.setText(saved_url)  # Set the trimmed saved value
-        
- 
-        self.url_edit.setText(self.settings.value("url", default_url).strip())  # Load saved URL or use default
-        self.url_edit.textChanged.connect(self.strip_spaces)  # Connect to strip spaces method
-
+        self.url_edit.setText(self.settings.value("url", default_url).strip())
+        self.url_edit.textChanged.connect(self.strip_spaces)
 
         self.username_edit = QLineEdit()
         self.username_edit.setPlaceholderText("Username")
-        #self.username_edit.setText(default_username)  # Set default username
-        self.username_edit.setText(self.settings.value("username", default_username))  # Load saved username or default value
+        self.username_edit.setText(self.settings.value("username", default_username))
 
         self.password_edit = QLineEdit()
         self.password_edit.setPlaceholderText("Password")
         self.password_edit.setEchoMode(QLineEdit.Password)
-        #self.password_edit.setText(default_password)  # Set default password
-        self.password_edit.setText(self.settings.value("password", default_password))  # Load saved password or default value
+        self.password_edit.setText(self.settings.value("password", default_password))
 
         self.save_button = QPushButton("Save Credentials")
-        self.save_button.setIcon(QIcon("icon.png"))  # Optional: Add an icon to the button
         self.save_button.clicked.connect(self.save_credentials)
-
 
         self.project_combobox = QComboBox()
         self.form_combobox = QComboBox()
-        
         self.filter_combobox = QComboBox()
         self.login_button = QPushButton("Login")
-
         self.login_button.clicked.connect(self.pre_login_with_validation)
 
-        # Process Form button
         self.process_button = QPushButton("Process Form")
         self.process_button.clicked.connect(self.pre_process_form)
-        self.process_button.setEnabled(False)  # Disable until a form is selected
+        self.process_button.setEnabled(False)
 
-        # Process Form button
         self.csv_button = QPushButton("Get CSV")
         self.csv_button.clicked.connect(self.save_geojson_as_csv)
-        self.csv_button.setEnabled(False)  # Disable until a form is selected
+        self.csv_button.setEnabled(False)
 
         # Create the QGIS map canvas
         self.map_canvas = QgsMapCanvas()
         self.map_canvas.setCanvasColor(Qt.white)
 
-        # Add widgets to layout
+        # Add widgets to form layout
         form_layout.addRow("ODK Central URL:", self.url_edit)
         form_layout.addRow("Username:", self.username_edit)
         form_layout.addRow("Password:", self.password_edit)
         form_layout.addRow("Project:", self.project_combobox)
         form_layout.addRow("Form:", self.form_combobox)
 
-        # Add Login button and Process Form button
-        layout.addLayout(form_layout)
-       # Create a horizontal layout for the buttons
+        # Create button layout
         button_layout = QHBoxLayout()
-
-        # Add buttons to the horizontal layout
         button_layout.addWidget(self.login_button)
         button_layout.addWidget(self.save_button)
         button_layout.addWidget(self.process_button)
         button_layout.addWidget(self.csv_button)
 
-        # Add the button layout to the main vertical layout
-        layout.addLayout(button_layout)
-        
-
-
-        # Set up the UI components
+        # Add progress bar
         self.progress_bar = QProgressBar(self)
-        self.progress_bar.setRange(0, 0)  # Indeterminate mode (no progress shown)
+        self.progress_bar.setRange(0, 0)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setAlignment(Qt.AlignCenter)
-            
-        layout.addWidget(self.progress_bar)  # Correct way to add widget to layout
-        # Create the QLabel for credits
+        self.progress_bar.hide()
 
+        # Add log window
+        self.log_textedit = QTextEdit()
+        self.log_textedit.setReadOnly(True)
+        self.log_textedit.setFixedHeight(100)
+        self.log_textedit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
 
+        # Add clear log button
+        self.clear_log_button = QPushButton("Clear Log")
+        self.clear_log_button.clicked.connect(self.clear_log)
 
-       # Create a QLabel for the logo
+        # Add logo and credits
         logo_label = QLabel()
-        pixmap = QPixmap(':/plugins/connect_odk/logo.svg')  # Replace with the actual path to your logo file
-        if not pixmap.isNull():  # Ensure the logo file is loaded correctly
-            pixmap = pixmap.scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # Scale logo
+        pixmap = QPixmap(':/plugins/connect_odk/logo.svg')
+        if not pixmap.isNull():
+            pixmap = pixmap.scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         logo_label.setPixmap(pixmap)
         logo_label.setAlignment(Qt.AlignCenter)
 
-        credit_label = QLabel('<a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">Powered by ODK</a>')
-
-        credit_label.setText('''
-                <div style="text-align: center;">
-                    <a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">Powered by ODK</a>
-                </div>
-            ''')
-        
+        credit_label = QLabel('''
+            <div style="text-align: center;">
+                <a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">Powered by ODK</a>
+            </div>
+        ''')
         credit_label.setAlignment(Qt.AlignCenter)
-        credit_label.setOpenExternalLinks(True)  # Allow hyperlink to open in browser
+        credit_label.setOpenExternalLinks(True)
 
         disclaimer_label = QLabel('''
             <div style="text-align: center; font-size: 10px; color: gray;">
-                <strong>Disclaimer:</strong> This plugin, is not created, endorsed, or affiliated with ODK or its developers. For official resources, visit <a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">getodk.org</a>.
+                <strong>Disclaimer:</strong> This plugin is not created, endorsed, or affiliated with ODK or its developers. 
+                For official resources, visit <a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">getodk.org</a>.
             </div>
         ''')
         disclaimer_label.setOpenExternalLinks(True)
 
-
-        # Add the QLabel to the layout
-        # layout.addWidget(logo_label)
+        # Assemble layout
+        layout.addLayout(form_layout)
+        layout.addLayout(button_layout)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.log_textedit)
+        layout.addWidget(self.clear_log_button)
         layout.addWidget(credit_label)
         layout.addWidget(disclaimer_label)
 
         self.setLayout(layout)
 
-        # Initially hide the progress bar
+    def log_message(self, message):
+        """Append a message to the log textedit widget."""
+        self.log_textedit.append(message)
+        self.log_textedit.ensureCursorVisible()
+
+    def clear_log(self):
+        """Clear all messages in the log window."""
+        self.log_textedit.clear()
+
+    def pre_process_form(self):
+        """Start progress bar and log immediately."""
+        self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Processing form, please wait...")
+        self.progress_bar.show()
+        self.process_form()  # Direct call, no delay
+
+    def fetch_submissions(self, server_url, username, password, project_id, form_id):
+        """Fetch all submissions for the selected form using OData in a single request with logging."""
+        submissions = []
+
+        headers = {
+            'Accept': 'application/json'
+        }
+
+        # Log immediately with timestamp and show progress bar
+        self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Initiating submission fetch...")
+        self.progress_bar.setRange(0, 0)  # Indeterminate during fetch
+        self.progress_bar.show()
+
+        try:
+            # Construct OData URL without $top or $skip for full fetch
+            submissions_api_url = (
+                f"{server_url}/v1/projects/{project_id}/forms/{form_id}.svc/Submissions"
+                f"?%24expand=*"
+            )
+            self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Requesting: {submissions_api_url}")
+
+            # Make the request
+            response = requests.get(submissions_api_url, auth=(username, password), headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+            if not isinstance(data, dict):
+                raise Exception("Unexpected response format. Expected a dictionary.")
+
+            submissions = data.get('value', [])
+            total_count = len(submissions)
+
+            # Log result
+            self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Retrieved {total_count} submissions.")
+
+            # Update progress bar
+            if total_count == 0:
+                self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] No submissions found.")
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(100)
+
+        except requests.exceptions.RequestException as e:
+            self.progress_bar.hide()
+            self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Error fetching submissions: {str(e)}")
+            raise Exception(f"Error occurred: {str(e)}")
+
         self.progress_bar.hide()
+        self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Completed fetching {total_count} submissions.")
+        return submissions
+
+
+
 
     def get_form_data(self):
         """Return the form data entered by the user."""
@@ -266,8 +326,7 @@ class ConnectODKDialog(QDialog):
             # Optionally, you can also raise the exception if you want to propagate it further
             #raise
 
-
-
+ 
     def on_project_selected(self):
         """Fetch forms when a project is selected."""
         selected_project_name = self.project_combobox.currentText()
@@ -340,31 +399,19 @@ class ConnectODKDialog(QDialog):
         
         raise Exception(f"Form ID not found for form: {form_name}")
 
-
-    def pre_process_form(self):
-      """start progress bar"""
-      self.progress_bar.show()
-      # Use QTimer to delay the login function by 1 second (1000 milliseconds)
-      QTimer.singleShot(1000, self.process_form)
-
+ 
     def hide_progress(self):
       """Hide progress bar"""
       self.progress_bar.hide()
  
-
-
-
+ 
     def process_form(self):
-        """Process the form, fetch submissions, and convert them to GeoJSON."""
-        
+        """Process the form, fetch submissions in batches, and convert them to GeoJSON."""
         server_url = self.url_edit.text()
         username = self.username_edit.text()
         password = self.password_edit.text()
         selected_project_name = self.project_combobox.currentText()
         selected_form_name = self.form_combobox.currentText()
-
-        #Show the progress bar
-         
 
         # Find the project ID from the list of projects
         selected_project_id = None
@@ -374,59 +421,33 @@ class ConnectODKDialog(QDialog):
                 break
 
         if selected_project_id:
-            # Fetch submissions for the selected form
             try:
                 form_id = self.get_form_id_from_name(selected_form_name, selected_project_id)
 
-                
+                # Fetch submissions in batches
                 submissions = self.fetch_submissions(server_url, username, password, selected_project_id, form_id)
+
+                if not submissions:
+                    QMessageBox.warning(self, "No Submissions", "No submissions found for the selected form.")
+                    self.hide_progress()
+                    return
 
                 with open('submissions.json', 'w') as f:
                     json.dump(submissions, f, indent=2)
                     print(f"submissions data saved to submissions.json")
-                 
+
                 # Convert submissions to GeoJSON
-                geojson_data = self.convert_to_geojson(submissions,'out.json')
-                
+                geojson_data = self.convert_to_geojson(submissions, 'out.json')
+
                 # Add the GeoJSON data as a layer to the map
-                self.add_geojson_to_map(geojson_data,selected_form_name)
-                
+                self.add_geojson_to_map(geojson_data, selected_form_name)
+
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Error processing form: {str(e)}")
+                self.hide_progress()
 
- 
-    def fetch_submissions(self, server_url, username, password, project_id, form_id):
-        """Fetch submissions for the selected form using OData."""
-        # Construct the OData endpoint for fetching submissions
-        submissions_api_url = f"{server_url}/v1/projects/{project_id}/forms/{form_id}.svc/Submissions?%24expand=*"
- 
-        # Set the headers to indicate that we expect JSON data
-        headers = {
-            'Accept': 'application/json'  # Ensure the response is in JSON format
-        }
 
-        try:
-            # Send GET request to OData endpoint with authentication and headers
-            response = requests.get(submissions_api_url, auth=(username, password), headers=headers)
-            
-            # Raise exception if the request failed (non-2xx status code)
-            response.raise_for_status()
 
-            # Parse the JSON response
-            dtr = response.json()
-
-            # Check if the response is a dictionary and contains the expected key
-            if isinstance(dtr, dict):
-                # For example, if the submissions are under a 'value' key
-                submissions = dtr.get('value', [])
-                return submissions
-            else:
-                raise Exception("Unexpected response format. Expected a dictionary with 'value' key.")
-
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"Error fetching submissions: {str(e)}")
-
-   
     def find_geometry(self, data):
         """
         Recursively search for GeoJSON geometry in the data.
@@ -465,13 +486,26 @@ class ConnectODKDialog(QDialog):
     def convert_to_geojson(self, data_array, output_file):
         """
         Convert a list of data dictionaries into a GeoJSON FeatureCollection,
-        handling cases with and without nesting.
+        handling cases with and without nesting, with 5 decimal precision and EPSG:4326 CRS.
         
         :param data_array: List of dictionaries containing 'geometry' and 'properties'
         :param output_file: The output file to save the GeoJSON data
         :return: GeoJSON FeatureCollection
         """
         features = []
+
+        def round_coordinates(geometry):
+            """Recursively round coordinates to 5 decimal places."""
+            if isinstance(geometry, dict) and 'coordinates' in geometry:
+                if isinstance(geometry['coordinates'], list):
+                    geometry['coordinates'] = [
+                        [
+                            round(c, 5) if isinstance(c, (int, float)) else c
+                            for c in coords
+                        ] if isinstance(coords, list) else round(coords, 5)
+                        for coords in geometry['coordinates']
+                    ]
+            return geometry
 
         for data in data_array:
             # Flatten all parent-level properties
@@ -480,6 +514,7 @@ class ConnectODKDialog(QDialog):
 
             # If geometry is found at the root level, create a feature
             if found_geometry:
+                found_geometry = round_coordinates(found_geometry)
                 geojson_feature = {
                     "type": "Feature",
                     "geometry": found_geometry,
@@ -500,6 +535,7 @@ class ConnectODKDialog(QDialog):
                         combined_properties = {**parent_properties, **nested_properties}
 
                         if nested_geometry:
+                            nested_geometry = round_coordinates(nested_geometry)
                             geojson_feature = {
                                 "type": "Feature",
                                 "geometry": nested_geometry,
@@ -507,9 +543,15 @@ class ConnectODKDialog(QDialog):
                             }
                             features.append(geojson_feature)
 
-        # Create a GeoJSON FeatureCollection
+        # Create a GeoJSON FeatureCollection with CRS
         geojson_collection = {
             "type": "FeatureCollection",
+            "crs": {
+                "type": "name",
+                "properties": {
+                    "name": "urn:ogc:def:crs:EPSG::4326"
+                }
+            },
             "features": features
         }
 
@@ -521,9 +563,9 @@ class ConnectODKDialog(QDialog):
         self.csv_button.setEnabled(True)
 
         return geojson_collection
-
- 
-
+    
+    
+        
     def remove_empty_properties(self,geojson_data):
         """Remove empty properties from GeoJSON features."""
         for feature in geojson_data.get('features', []):
@@ -532,7 +574,7 @@ class ConnectODKDialog(QDialog):
         return geojson_data
  
 
-    def add_geojson_to_map(self, geojson_data, form_name):
+    def xadd_geojson_to_map(self, geojson_data, form_name):
         """Add GeoJSON data as separate layers to the map based on geometry type."""
         
         # Remove empty properties
@@ -580,6 +622,53 @@ class ConnectODKDialog(QDialog):
 
         print("GeoJSON data has been added to the map with separate layers for each geometry type.")
 
+    def add_geojson_to_map(self, geojson_data, form_name):
+        """Add GeoJSON data as separate layers to the map based on geometry type."""
+        
+        # Remove empty properties
+        geojson_data = self.remove_empty_properties(geojson_data)
+        self.geo_data = geojson_data
+
+        # Split features by geometry type
+        geometry_types = {
+            "Point": [],
+            "Linear": [],
+            "Polygon": [],
+        }
+
+        # Separate features by geometry type
+        for feature in geojson_data.get("features", []):
+            geometry_type = feature["geometry"]["type"]
+            if geometry_type == "LineString":
+                geometry_types["Linear"].append(feature)
+            elif geometry_type in geometry_types:
+                geometry_types[geometry_type].append(feature)
+        
+        # Create layers for each geometry type
+        for geom_type, features in geometry_types.items():
+            if not features:
+                continue  # Skip if no features for this geometry type
+            
+            # Create a GeoJSON string for this geometry type
+            geom_geojson_data = {
+                "type": "FeatureCollection",
+                "features": features
+            }
+            geom_geojson_str = json.dumps(geom_geojson_data)
+            
+            # Create a layer for this geometry type with explicit CRS
+            vector_layer = QgsVectorLayer(geom_geojson_str, f"{form_name}_{geom_type}", "ogr")
+            vector_layer.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+            
+            # Add the vector layer to the current map project
+            QgsProject.instance().addMapLayer(vector_layer)
+        
+        # Optionally zoom to the extent of all added layers
+        self.map_canvas.zoomToFullExtent()
+        self.map_canvas.refresh()
+        self.hide_progress()
+
+        print("GeoJSON data has been added to the map with separate layers for each geometry type.")
  
     def extract_headers_from_geojson(self,features):
         """
