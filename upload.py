@@ -94,7 +94,6 @@ class SearchableComboBox(QComboBox):
                 super().setCurrentText(text)
         self.blockSignals(False)
 
-
 class Worker(QObject):
     """Worker object to run fetch_pcode_data in a background thread."""
     progress = pyqtSignal(int)
@@ -109,17 +108,93 @@ class Worker(QObject):
         self.url = url
         self.token = token
         self.gdf = None
-        self._is_running = True  # Flag to control execution
+        self._is_running = True
 
     def stop(self):
         """Signal the worker to stop execution."""
         self._is_running = False
 
- 
+    def buffer_geometry(self, geom, distance_km=5):
+        """Buffer a geometry by a distance in kilometers (approx. for EPSG:4326)."""
+        if geom is None:
+            return None
+        distance_deg = distance_km / 111.0
+        return geom.buffer(distance_deg)
 
+    def fetch_settlements_geojson(self):
+        """Fetch settlements GeoJSON from the server with model query parameter."""
+        try:
+            headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
+            self.log.emit(f"Fetching {self.parent_entity_name} GeoJSON...")
+            response = requests.get(
+                f"{self.url}/api/v1/data/geo/minimal",
+                headers=headers,
+                params={'model': self.parent_entity_name},
+                timeout=30
+            )
+            response.raise_for_status()
+            geojson = response.json()
+            if not isinstance(geojson, dict) or "features" not in geojson or geojson.get('type') != 'FeatureCollection':
+                raise ValueError("Invalid GeoJSON format")
+            settlements_gdf = gpd.GeoDataFrame.from_features(geojson["features"])
+            self.log.emit(f"Loaded {len(settlements_gdf)} {self.parent_entity_name} features.")
+            return settlements_gdf
+        except Exception as e:
+            self.log.emit(f"Error fetching {self.parent_entity_name} GeoJSON: {str(e)}")
+            raise
+
+    def process_pcode_batch(self, start, batch_indices, batch_codes, batch_num, total_items, batch_size):
+        """Process a batch of pcode-based queries."""
+        if not self._is_running:
+            return 0, []
+        try:
+            self.log.emit(f"Processing pcode batch {batch_num} ({start+1}–{min(start+batch_size, total_items)} of {total_items})")
+            response = requests.post(
+                f"{self.url}/api/v1/data/many/code",
+                headers={"Authorization": f"Bearer {self.token}", "x-access-token": self.token},
+                json={"model": self.parent_entity_name, "codes": batch_codes}
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                records = payload.get("data", [])
+                code_map = {r["code"]: r for r in records}
+                batch_results = []
+                for row_idx, pcode in batch_indices:
+                    rec = code_map.get(pcode)
+                    if rec and rec.get("id"):
+                        parent = self.parent_entity_name.lower()
+                        if parent == "settlement":
+                            key = "settlement_id"
+                        elif parent == "ward":
+                            key = "ward_id"
+                        elif parent == "subcounty":
+                            key = "subcounty_id"
+                        elif parent == "county":
+                            key = "county_id"
+                        else:
+                            key = None
+                        if key:
+                            data = {
+                                key: int(rec["id"]) if rec.get("id") is not None else None,
+                                **({"settlement_id": int(rec.get("settlement_id")) if rec.get("settlement_id") is not None else None} if key != "settlement_id" else {}),
+                                **({"ward_id": int(rec.get("ward_id")) if rec.get("ward_id") is not None else None} if key != "ward_id" else {}),
+                                **({"subcounty_id": int(rec.get("subcounty_id")) if rec.get("subcounty_id") is not None else None} if key != "subcounty_id" else {}),
+                                **({"county_id": int(rec.get("county_id")) if rec.get("county_id") is not None else None} if key != "county_id" else {})
+                            }
+                            batch_results.append((row_idx, data))
+                            self.log.emit(f"Batch-fetched data for index {row_idx}: {data}")
+                    else:
+                        self.log.emit(f"No data for pcode '{pcode}' at index {row_idx}")
+                return len(batch_codes), batch_results
+            else:
+                self.log.emit(f"Batch {batch_num} request failed: {response.text}")
+                return len(batch_codes), []
+        except Exception as e:
+            self.log.emit(f"Batch {batch_num} error: {str(e)}")
+            return len(batch_codes), []
 
     def run(self):
-        """Fetch pcode-based entity data in the background with concurrent batch processing."""
+        """Fetch entity data with pcode matching and local GeoJSON intersection for unmatched rows."""
         try:
             if not self._is_running:
                 self.log.emit("Worker stopped before starting.")
@@ -128,192 +203,39 @@ class Worker(QObject):
                 return
 
             layer_fields = [f.name() for f in self.layer.fields()]
-            use_geometry_lookup = 'pcode' not in layer_fields
-            if not use_geometry_lookup:
-                self.log.emit("'code' column found in layer." if "code" in layer_fields else "No 'code' column found. Generating unique codes using shortid.")
-            
+            has_pcode = 'pcode' in layer_fields
+            self.log.emit(f"Pcode column {'found' if has_pcode else 'not found'} in layer.")
+
             srid = self.layer.crs().postgisSrid()
             self.log.emit(f"Layer CRS SRID detected: {srid}")
 
             pcode_entity_data = {}
             valid_feature_indices = []
-            headers = {
-                "Authorization": f"Bearer {self.token}",
-                "x-access-token": self.token
-            }
-            lock = threading.Lock()  # For thread-safe updates
+            lock = threading.Lock()
             batch_size = 500
-            max_workers = 3  # Limit concurrent threads to avoid server overload
+            max_workers = 3
             processed_items = 0
+            total_items = len(self.gdf)
 
-            def process_geometry_batch(start, batch_geometries, batch_num, total_items):
-                if not self._is_running:
-                    return 0, []
-                try:
-                    self.log.emit(f"Processing geometry batch {batch_num} ({start+1}–{min(start+batch_size, total_items)} of {total_items})")
-                    response = requests.post(
-                        f"{self.url}/api/v1/data/intersect",
-                        headers=headers,
-                        json={
-                            "model": self.parent_entity_name,
-                            "geometry": batch_geometries,
-                            "srid": srid
-                        }
-                    )
-                    if response.status_code == 200:
-                        entity_data = response.json()
-                        results = entity_data.get("data", [])
-                        self.log.emit(f"Received {entity_data.get('count', 0)} intersecting records in batch {batch_num}")
-                        batch_results = []
-                        for result in results:
-                            geometry_index = result.get("geometry_index")
-                            records = result.get("records", [])
-                            if geometry_index is not None and geometry_index < len(batch_geometries):
-                                global_index = start + geometry_index
-                                if global_index in index_to_row:
-                                    row_idx = index_to_row[global_index]
-                                    if records:
-                                        record = records[0]
-                                        if record.get("id"):
-                                            id_key = None
-                                            parent_entity_lower = self.parent_entity_name.lower()
-                                            if parent_entity_lower == "settlement":
-                                                id_key = "settlement_id"
-                                            elif parent_entity_lower == "ward":
-                                                id_key = "ward_id"
-                                            elif parent_entity_lower == "subcounty":
-                                                id_key = "subcounty_id"
-                                            elif parent_entity_lower == "county":
-                                                id_key = "county_id"
-                                            if id_key:
-                                                data = {
-                                                    id_key: record.get("id"),
-                                                    **({"settlement_id": record.get("settlement_id")} if id_key != "settlement_id" else {}),
-                                                    **({"ward_id": record.get("ward_id")} if id_key != "ward_id" else {}),
-                                                    **({"subcounty_id": record.get("subcounty_id")} if id_key != "subcounty_id" else {}),
-                                                    **({"county_id": record.get("county_id")} if id_key != "county_id" else {})
-                                                }
-                                                batch_results.append((row_idx, data))
-                                                self.log.emit(f"Assigned {parent_entity_lower}-based data for index {row_idx}: {data}")
-                                            else:
-                                                self.log.emit(f"Error: Invalid parent entity '{self.parent_entity_name}' for index {row_idx}")
-                                        else:
-                                            self.log.emit(f"No intersect result for geometry at index {row_idx}")
-                                    else:
-                                        self.log.emit(f"Invalid global geometry_index {global_index} in response")
-                                else:
-                                    self.log.emit(f"Invalid geometry_index {geometry_index} in batch {batch_num}")
-                        return len(batch_geometries), batch_results
-                    else:
-                        self.log.emit(f"Failed to fetch batch {batch_num} geometry data: {response.text}")
-                        return len(batch_geometries), []
-                except Exception as e:
-                    self.log.emit(f"Error fetching batch {batch_num} geometry data: {str(e)}")
-                    return len(batch_geometries), []
-
-            def process_pcode_batch(start, batch_indices, batch_codes, batch_num, total_items):
-                if not self._is_running:
-                    return 0, []
-                try:
-                    self.log.emit(f"Processing pcode batch {batch_num} ({start+1}–{min(start+batch_size, total_items)} of {total_items})")
-                    response = requests.post(
-                        f"{self.url}/api/v1/data/many/code",
-                        headers=headers,
-                        json={
-                            "model": self.parent_entity_name,
-                            "codes": batch_codes
-                        }
-                    )
-                    if response.status_code == 200:
-                        payload = response.json()
-                        records = payload.get("data", [])
-                        code_map = {r["code"]: r for r in records}
-                        batch_results = []
-                        for row_idx, pcode in batch_indices:
-                            rec = code_map.get(pcode)
-                            if rec and rec.get("id"):
-                                parent = self.parent_entity_name.lower()
-                                if parent == "settlement":
-                                    key = "settlement_id"
-                                elif parent == "ward":
-                                    key = "ward_id"
-                                elif parent == "subcounty":
-                                    key = "subcounty_id"
-                                elif parent == "county":
-                                    key = "county_id"
-                                else:
-                                    key = None
-                                if key:
-                                    data = {
-                                        key: rec["id"],
-                                        **({"settlement_id": rec.get("settlement_id")} if key != "settlement_id" else {}),
-                                        **({"ward_id": rec.get("ward_id")} if key != "ward_id" else {}),
-                                        **({"subcounty_id": rec.get("subcounty_id")} if key != "subcounty_id" else {}),
-                                        **({"county_id": rec.get("county_id")} if key != "county_id" else {})
-                                    }
-                                    batch_results.append((row_idx, data))
-                                    self.log.emit(f"Batch-fetched data for index {row_idx}: {data}")
-                            else:
-                                self.log.emit(f"No data for pcode '{pcode}' at index {row_idx}")
-                        return len(batch_codes), batch_results
-                    else:
-                        self.log.emit(f"Batch {batch_num} request failed: {response.text}")
-                        return len(batch_codes), []
-                except Exception as e:
-                    self.log.emit(f"Batch {batch_num} error: {str(e)}")
-                    return len(batch_codes), []
-
-            if use_geometry_lookup:
-                geometries = [row["geojson"] for _, row in self.gdf.iterrows() if row["geojson"] is not None]
-                if not geometries:
-                    self.log.emit("No valid geometries found for intersection.")
-                    self.result.emit(pcode_entity_data, valid_feature_indices)
-                    self.finished.emit()
-                    return
-
-                total_items = len(geometries)
-                index_to_row = {i: row_idx for i, (row_idx, _) in enumerate(self.gdf.iterrows()) if self.gdf.loc[row_idx, "geojson"] is not None}
-
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = []
-                    for start in range(0, total_items, batch_size):
-                        batch_geometries = geometries[start:start + batch_size]
-                        batch_num = start // batch_size + 1
-                        futures.append(executor.submit(process_geometry_batch, start, batch_geometries, batch_num, total_items))
-
-                    for future in as_completed(futures):
-                        if not self._is_running:
-                            self.log.emit("Worker stopped during geometry processing.")
-                            break
-                        processed, batch_results = future.result()
-                        with lock:
-                            processed_items += processed
-                            for row_idx, data in batch_results:
-                                pcode_entity_data[row_idx] = data
-                                valid_feature_indices.append(row_idx)
-                            progress = int((processed_items / total_items) * 100)
-                            self.progress.emit(progress)
-
-            else:
+            # Step 1: Pcode matching
+            if has_pcode:
                 index_to_pcode = [
                     (row_idx, row["pcode"])
                     for row_idx, row in self.gdf.iterrows()
                     if row.get("pcode")
                 ]
+                self.log.emit(f"Found {len(index_to_pcode)} rows with pcode values.")
 
-                if not index_to_pcode:
-                    self.log.emit("No pcode values found; skipping batch lookup.")
-                else:
-                    total_items = len(index_to_pcode)
-                    codes = [p for _, p in index_to_pcode]
-
+                if index_to_pcode:
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         futures = []
-                        for start in range(0, total_items, batch_size):
+                        for start in range(0, len(index_to_pcode), batch_size):
                             batch_indices = index_to_pcode[start:start + batch_size]
                             batch_codes = [p for _, p in batch_indices]
                             batch_num = start // batch_size + 1
-                            futures.append(executor.submit(process_pcode_batch, start, batch_indices, batch_codes, batch_num, total_items))
+                            futures.append(executor.submit(
+                                self.process_pcode_batch, start, batch_indices, batch_codes, batch_num, len(index_to_pcode), batch_size
+                            ))
 
                         for future in as_completed(futures):
                             if not self._is_running:
@@ -326,7 +248,63 @@ class Worker(QObject):
                                     pcode_entity_data[row_idx] = data
                                     valid_feature_indices.append(row_idx)
                                 progress = int((processed_items / total_items) * 100)
-                                self.progress.emit(progress)
+                                self.progress.emit(min(progress, 50))  # Up to 50% for pcode
+
+            # Step 2: Local GeoJSON intersection for unmatched rows
+            unmatched_indices = [
+                row_idx for row_idx, _ in self.gdf.iterrows()
+                if row_idx not in pcode_entity_data and self.gdf.loc[row_idx, "geojson"] is not None
+            ]
+            self.log.emit(f"Processing {len(unmatched_indices)} unmatched rows with local 5 km buffered geometry intersection.")
+
+            if unmatched_indices:
+                # Fetch GeoJSON
+                settlements_gdf = self.fetch_settlements_geojson()
+
+                # Prepare unmatched geometries with 5 km buffer
+                unmatched_gdf = self.gdf.loc[unmatched_indices].copy()
+                unmatched_gdf['geometry'] = unmatched_gdf['geojson'].apply(lambda x: shape(x) if x else None)
+                unmatched_gdf = unmatched_gdf[unmatched_gdf['geometry'].notnull()]
+                unmatched_gdf['geometry'] = unmatched_gdf['geometry'].apply(self.buffer_geometry)
+                unmatched_gdf = gpd.GeoDataFrame(unmatched_gdf, geometry='geometry', crs="EPSG:4326")
+
+                if not unmatched_gdf.empty:
+                    # Perform spatial intersection
+                    self.log.emit("Performing local spatial intersection...")
+                    intersections = gpd.sjoin(unmatched_gdf, settlements_gdf, how="left", predicate="intersects")
+                    for idx, row in intersections.iterrows():
+                        if not pd.isna(row['index_right']):
+                            row_idx = idx
+                            settlement = settlements_gdf.loc[row['index_right']]
+                            parent = self.parent_entity_name.lower()
+                            if parent == "settlement":
+                                key = "settlement_id"
+                            elif parent == "ward":
+                                key = "ward_id"
+                            elif parent == "subcounty":
+                                key = "subcounty_id"
+                            elif parent == "county":
+                                key = "county_id"
+                            else:
+                                key = None
+                            if key and settlement.get("id"):
+                                data = {
+                                    key: int(settlement["id"]) if settlement.get("id") is not None else None,
+                                    **({"settlement_id": int(settlement.get("settlement_id")) if settlement.get("settlement_id") is not None else None} if key != "settlement_id" else {}),
+                                    **({"ward_id": int(settlement.get("ward_id")) if settlement.get("ward_id") is not None else None} if key != "ward_id" else {}),
+                                    **({"subcounty_id": int(settlement.get("subcounty_id")) if settlement.get("subcounty_id") is not None else None} if key != "subcounty_id" else {}),
+                                    **({"county_id": int(settlement.get("county_id")) if settlement.get("county_id") is not None else None} if key != "county_id" else {})
+                                }
+                                with lock:
+                                    pcode_entity_data[row_idx] = data
+                                    valid_feature_indices.append(row_idx)
+                                    processed_items += 1
+                                    self.log.emit(f"Assigned {parent}-based data for index {row_idx}: {data}")
+                        else:
+                            self.log.emit(f"No intersection for buffered geometry at index {idx}")
+
+                    progress = int((processed_items / total_items) * 100)
+                    self.progress.emit(progress)  # Up to 100% for intersection
 
             if pcode_entity_data:
                 self.log.emit(f"Data fetched successfully for {len(valid_feature_indices)} rows with parent entity '{self.parent_entity_name}'.")
@@ -337,11 +315,238 @@ class Worker(QObject):
             self.finished.emit()
 
         except Exception as e:
-            self.log.emit(f"Error fetching pcode data: {str(e)}")
+            self.log.emit(f"Error fetching entity data: {str(e)}")
             self.finished.emit()
-    
 
+class WorkerLocalGeoJSON(QObject):
+    """Worker object to fetch settlements GeoJSON and perform local intersections."""
+    progress = pyqtSignal(int)
+    log = pyqtSignal(str)
+    finished = pyqtSignal()
+    result = pyqtSignal(dict, list)
 
+    def __init__(self, layer, parent_entity_name, url, token):
+        super().__init__()
+        self.layer = layer
+        self.parent_entity_name = parent_entity_name
+        self.url = url
+        self.token = token
+        self.gdf = None
+        self._is_running = True
+
+    def stop(self):
+        """Signal the worker to stop execution."""
+        self._is_running = False
+
+    def buffer_geometry(self, geom, distance_km=5):
+        """Buffer a geometry by a distance in kilometers (approx. for EPSG:4326)."""
+        if geom is None:
+            return None
+        distance_deg = distance_km / 111.0  # 1 degree ≈ 111 km
+        return geom.buffer(distance_deg)
+
+    def fetch_settlements_geojson(self):
+        """Fetch settlements GeoJSON from the server."""
+        try:
+            headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
+            self.log.emit("Fetching settlements GeoJSON...")
+            #response = requests.get(f"{self.url}/api/v1/data/geo/minimal", headers=headers, timeout=30)
+            response = requests.get(
+                f"{self.url}/api/v1/data/geo/minimal",
+                headers=headers,
+                params={'model': self.parent_entity_name},
+                timeout=30
+            )
+
+            response.raise_for_status()
+            geojson = response.json()
+            if not isinstance(geojson, dict) or "features" not in geojson:
+                raise ValueError("Invalid GeoJSON format")
+            settlements_gdf = gpd.GeoDataFrame.from_features(geojson["features"])
+            self.log.emit(f"Loaded {len(settlements_gdf)} settlement features.")
+            return settlements_gdf
+        except Exception as e:
+            self.log.emit(f"Error fetching settlements GeoJSON: {str(e)}")
+            raise
+
+    def process_pcode_batch(self, start, batch_indices, batch_codes, batch_num, total_items, batch_size):
+        """Process a batch of pcode-based queries."""
+        if not self._is_running:
+            return 0, []
+        try:
+            self.log.emit(f"Processing pcode batch {batch_num} ({start+1}–{min(start+batch_size, total_items)} of {total_items})")
+            response = requests.post(
+                f"{self.url}/api/v1/data/many/code",
+                headers={"Authorization": f"Bearer {self.token}", "x-access-token": self.token},
+                json={"model": self.parent_entity_name, "codes": batch_codes}
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                records = payload.get("data", [])
+                code_map = {r["code"]: r for r in records}
+                batch_results = []
+                for row_idx, pcode in batch_indices:
+                    rec = code_map.get(pcode)
+                    if rec and rec.get("id"):
+                        parent = self.parent_entity_name.lower()
+                        if parent == "settlement":
+                            key = "settlement_id"
+                        elif parent == "ward":
+                            key = "ward_id"
+                        elif parent == "subcounty":
+                            key = "subcounty_id"
+                        elif parent == "county":
+                            key = "county_id"
+                        else:
+                            key = None
+                        if key:
+                            data = {
+                                key: int(rec["id"]) if rec.get("id") is not None else None,
+                                **({"settlement_id": int(rec.get("settlement_id")) if rec.get("settlement_id") is not None else None} if key != "settlement_id" else {}),
+                                **({"ward_id": int(rec.get("ward_id")) if rec.get("ward_id") is not None else None} if key != "ward_id" else {}),
+                                **({"subcounty_id": int(rec.get("subcounty_id")) if rec.get("subcounty_id") is not None else None} if key != "subcounty_id" else {}),
+                                **({"county_id": int(rec.get("county_id")) if rec.get("county_id") is not None else None} if key != "county_id" else {})
+                            }
+                            batch_results.append((row_idx, data))
+                            self.log.emit(f"Batch-fetched data for index {row_idx}: {data}")
+                    else:
+                        self.log.emit(f"No data for pcode '{pcode}' at index {row_idx}")
+                return len(batch_codes), batch_results
+            else:
+                self.log.emit(f"Batch {batch_num} request failed: {response.text}")
+                return len(batch_codes), []
+        except Exception as e:
+            self.log.emit(f"Batch {batch_num} error: {str(e)}")
+            return len(batch_codes), []
+        
+
+        
+    def run(self):
+        """Fetch entity data with pcode matching and local buffered geometry intersection."""
+        try:
+            if not self._is_running:
+                self.log.emit("Worker stopped before starting.")
+                self.result.emit({}, [])
+                self.finished.emit()
+                return
+
+            layer_fields = [f.name() for f in self.layer.fields()]
+            has_pcode = 'pcode' in layer_fields
+            self.log.emit(f"Pcode column {'found' if has_pcode else 'not found'} in layer.")
+
+            srid = self.layer.crs().postgisSrid()
+            self.log.emit(f"Layer CRS SRID detected: {srid}")
+
+            pcode_entity_data = {}
+            valid_feature_indices = []
+            lock = threading.Lock()
+            batch_size = 500
+            max_workers = 3
+            processed_items = 0
+            total_items = len(self.gdf)
+
+            # Step 1: Pcode matching
+            if has_pcode:
+                index_to_pcode = [
+                    (row_idx, row["pcode"])
+                    for row_idx, row in self.gdf.iterrows()
+                    if row.get("pcode")
+                ]
+                self.log.emit(f"Found {len(index_to_pcode)} rows with pcode values.")
+
+                if index_to_pcode:
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = []
+                        for start in range(0, len(index_to_pcode), batch_size):
+                            batch_indices = index_to_pcode[start:start + batch_size]
+                            batch_codes = [p for _, p in batch_indices]
+                            batch_num = start // batch_size + 1
+                            futures.append(executor.submit(
+                                self.process_pcode_batch, start, batch_indices, batch_codes, batch_num, len(index_to_pcode), batch_size
+                            ))
+
+                        for future in as_completed(futures):
+                            if not self._is_running:
+                                self.log.emit("Worker stopped during pcode processing.")
+                                break
+                            processed, batch_results = future.result()
+                            with lock:
+                                processed_items += processed
+                                for row_idx, data in batch_results:
+                                    pcode_entity_data[row_idx] = data
+                                    valid_feature_indices.append(row_idx)
+                                progress = int((processed_items / total_items) * 100)
+                                self.progress.emit(min(progress, 50))  # Up to 50% for pcode
+
+            # Step 2: Local buffered intersection for unmatched rows
+            unmatched_indices = [
+                row_idx for row_idx, _ in self.gdf.iterrows()
+                if row_idx not in pcode_entity_data and self.gdf.loc[row_idx, "geojson"] is not None
+            ]
+            self.log.emit(f"Processing {len(unmatched_indices)} unmatched rows with local 5 km buffered geometry intersection.")
+
+            if unmatched_indices:
+                # Fetch settlements GeoJSON
+                settlements_gdf = self.fetch_settlements_geojson()
+
+                # Prepare unmatched geometries with 5 km buffer
+                unmatched_gdf = self.gdf.loc[unmatched_indices].copy()
+                unmatched_gdf['geometry'] = unmatched_gdf['geojson'].apply(lambda x: shape(x) if x else None)
+                unmatched_gdf = unmatched_gdf[unmatched_gdf['geometry'].notnull()]
+                unmatched_gdf['geometry'] = unmatched_gdf['geometry'].apply(self.buffer_geometry)
+                unmatched_gdf = gpd.GeoDataFrame(unmatched_gdf, geometry='geometry', crs="EPSG:4326")
+
+                if not unmatched_gdf.empty:
+                    # Perform spatial intersection
+                    self.log.emit("Performing local spatial intersection...")
+                    intersections = gpd.sjoin(unmatched_gdf, settlements_gdf, how="left", predicate="intersects")
+                    for idx, row in intersections.iterrows():
+                        if not pd.isna(row['index_right']):
+                            row_idx = idx
+                            settlement = settlements_gdf.loc[row['index_right']]
+                            parent = self.parent_entity_name.lower()
+                            if parent == "settlement":
+                                key = "settlement_id"
+                            elif parent == "ward":
+                                key = "ward_id"
+                            elif parent == "subcounty":
+                                key = "subcounty_id"
+                            elif parent == "county":
+                                key = "county_id"
+                            else:
+                                key = None
+                            if key and settlement.get("id"):
+                                data = {
+                                    key: int(settlement["id"]) if settlement.get("id") is not None else None,
+                                    **({"settlement_id": int(settlement.get("settlement_id")) if settlement.get("settlement_id") is not None else None} if key != "settlement_id" else {}),
+                                    **({"ward_id": int(settlement.get("ward_id")) if settlement.get("ward_id") is not None else None} if key != "ward_id" else {}),
+                                    **({"subcounty_id": int(settlement.get("subcounty_id")) if settlement.get("subcounty_id") is not None else None} if key != "subcounty_id" else {}),
+                                    **({"county_id": int(settlement.get("county_id")) if settlement.get("county_id") is not None else None} if key != "county_id" else {})
+                                }
+                                with lock:
+                                    pcode_entity_data[row_idx] = data
+                                    valid_feature_indices.append(row_idx)
+                                    processed_items += 1
+                                    self.log.emit(f"Assigned {parent}-based data for index {row_idx}: {data}")
+                        else:
+                            self.log.emit(f"No intersection for buffered geometry at index {idx}")
+
+                    progress = int((processed_items / total_items) * 100)
+                    self.progress.emit(progress)  # Up to 100% for intersection
+
+            if pcode_entity_data:
+                self.log.emit(f"Data fetched successfully for {len(valid_feature_indices)} rows with parent entity '{self.parent_entity_name}'.")
+            else:
+                self.log.emit(f"No data fetched for parent entity '{self.parent_entity_name}'.")
+
+            self.result.emit(pcode_entity_data, valid_feature_indices)
+            self.finished.emit()
+
+        except Exception as e:
+            self.log.emit(f"Error fetching entity data: {str(e)}")
+            self.finished.emit()
+
+ 
 
 
 
@@ -498,9 +703,17 @@ class KesMISDialog(QDialog):
         self.entity_combo.setPlaceholderText("Search entities...")
         entity_selection_layout.addWidget(QLabel("Select Entity:"))
         entity_selection_layout.addWidget(self.entity_combo)
+        # Add intersection method toggle
+        intersection_layout = QHBoxLayout()
+        self.local_intersection_check = QCheckBox("Use Local GeoJSON Intersection")
+        self.local_intersection_check.setChecked(False)  # Default to server-side
+        intersection_layout.addWidget(QLabel("Intersection Method:"))
+        intersection_layout.addWidget(self.local_intersection_check)
+        intersection_layout.addStretch()
         layer_layout.addLayout(layer_selection_layout)
         layer_layout.addLayout(parent_selection_layout)
         layer_layout.addLayout(entity_selection_layout)
+        layer_layout.addLayout(intersection_layout)
         layer_box.setLayout(layer_layout)
         layer_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         top_layout.addWidget(layer_box, 1)
@@ -508,8 +721,6 @@ class KesMISDialog(QDialog):
         # Field Mapping Table
         mapping_box = QGroupBox("Field Mapping")
         mapping_layout = QVBoxLayout()
-
-        # Search bar and clear button
         search_layout = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search layer or API fields...")
@@ -520,14 +731,12 @@ class KesMISDialog(QDialog):
         search_layout.addWidget(self.search_input)
         search_layout.addWidget(self.clear_search_button)
         mapping_layout.addLayout(search_layout)
-
         self.mapping_table = QTableWidget()
         self.mapping_table.setColumnCount(3)
         self.mapping_table.setHorizontalHeaderLabels(["Layer Field", "API Field", "Match Score"])
         self.mapping_table.setFixedHeight(250)
         self.mapping_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         mapping_layout.addWidget(self.mapping_table)
-
         self.submit_button = QPushButton("Submit Data to KeSMIS")
         self.submit_button.setEnabled(False)
         self.submit_button.clicked.connect(self.submit_features)
@@ -589,18 +798,7 @@ class KesMISDialog(QDialog):
         self.log_message(f"Filtered table with query: '{text}'" if text else "Cleared table filter")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
+ 
 
     def clear_log(self):
         """Clear all messages in the log window."""
@@ -680,27 +878,33 @@ class KesMISDialog(QDialog):
         self.entity_combo.setEnabled(False)
         self.submit_button.setEnabled(False)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 100)  # Determinate progress bar for all lookups
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
 
-        self.worker = Worker(
-            self.layer_combo.currentData(),
-            self.parent_combo.currentText(),
-            self.url_input.text(),
-            self.token
-        )
+        # Choose worker based on intersection method
+        if self.local_intersection_check.isChecked():
+            self.worker = WorkerLocalGeoJSON(
+                self.layer_combo.currentData(),
+                self.parent_combo.currentText(),
+                self.url_input.text(),
+                self.token
+            )
+        else:
+            self.worker = Worker(
+                self.layer_combo.currentData(),
+                self.parent_combo.currentText(),
+                self.url_input.text(),
+                self.token
+            )
+
         self.worker.gdf = self.gdf
         self.worker.moveToThread(self.thread)
-
         self.worker.progress.connect(self.progress_bar.setValue)
         self.worker.log.connect(self.log_message)
         self.worker.result.connect(self.on_fetch_pcode_data_finished)
         self.worker.finished.connect(self.on_worker_finished)
-
         self.thread.started.connect(self.worker.run)
         self.thread.start()
-
-
 
 
     def on_fetch_pcode_data_finished(self, pcode_entity_data, valid_feature_indices):
