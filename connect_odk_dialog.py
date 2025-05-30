@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QDialog, QComboBox, QLineEdit, QPushButton, QVBoxLayout, QFormLayout, QMessageBox
+from PyQt5.QtWidgets import QDialog, QComboBox, QLineEdit, QPushButton, QVBoxLayout, QFormLayout, QMessageBox,QApplication
 from qgis.core import QgsVectorLayer, QgsProject
 from qgis.gui import QgsMapCanvas  # Ensure QgsMapCanvas is imported from qgis.gui
 from PyQt5.QtWidgets import QVBoxLayout, QPushButton, QHBoxLayout
@@ -46,6 +46,77 @@ from qgis.PyQt.QtWidgets import QFileDialog
 from collections import OrderedDict
 
 from datetime import datetime  # Ensure this is in imports
+from PyQt5.QtCore import QThread, pyqtSignal, QObject
+
+
+class SubmissionWorker(QObject):
+    """Worker to fetch submissions in a background thread."""
+    progress = pyqtSignal(int)  # Emit progress percentage
+    log = pyqtSignal(str)  # Emit log messages
+    finished = pyqtSignal()  # Signal when done
+    result = pyqtSignal(list)  # Emit fetched submissions
+    error = pyqtSignal(str)  # Emit error message
+
+    def __init__(self, server_url, username, password, project_id, form_id):
+        super().__init__()
+        self.server_url = server_url
+        self.username = username
+        self.password = password
+        self.project_id = project_id
+        self.form_id = form_id
+        self._is_running = True
+
+    def stop(self):
+        """Signal the worker to stop execution."""
+        self._is_running = False
+
+    def run(self):
+        """Fetch submissions in the background."""
+        try:
+            if not self._is_running:
+                self.log.emit(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Worker stopped before starting.")
+                self.result.emit([])
+                self.finished.emit()
+                return
+
+            headers = {'Accept': 'application/json'}
+            self.log.emit(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Initiating submission fetch...")
+            self.progress.emit(0)
+
+            submissions_api_url = (
+                f"{self.server_url}/v1/projects/{self.project_id}/forms/{self.form_id}.svc/Submissions"
+                f"?%24expand=*"
+            )
+            self.log.emit(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Requesting: {submissions_api_url}")
+            self.log.emit(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Please wait...")
+
+            response = requests.get(submissions_api_url, auth=(self.username, self.password), headers=headers, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            if not isinstance(data, dict):
+                raise Exception("Unexpected response format. Expected a dictionary.")
+
+            submissions = data.get('value', [])
+            total_count = len(submissions)
+            self.log.emit(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Retrieved {total_count} submissions.")
+
+            if total_count == 0:
+                self.log.emit(f"[{datetime.now().strftime('%H:%M:%S.%f')}] No submissions found.")
+            self.progress.emit(100)
+
+            self.result.emit(submissions)
+            self.finished.emit()
+
+        except requests.exceptions.RequestException as e:
+            self.error.emit(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Error fetching submissions: {str(e)}")
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Unexpected error: {str(e)}")
+            self.finished.emit()
+
+
+
 
 class ConnectODKDialog(QDialog):
     """Dialog to get user input for ODK Central credentials and form selection."""
@@ -80,7 +151,7 @@ class ConnectODKDialog(QDialog):
         self.settings = QSettings("AGS", "ODKConnect")
 
         self.setWindowTitle('Connector for ODK')
-        self.setFixedSize(500, 400)  # Increased height for clear button
+        self.setFixedSize(600, 450)  # Increased height for clear button
 
         # Initialize variables
         self.projects = []
@@ -192,6 +263,8 @@ class ConnectODKDialog(QDialog):
         layout.addWidget(disclaimer_label)
 
         self.setLayout(layout)
+        self.submission_thread = QThread()
+        self.submission_worker = None
 
     def log_message(self, message):
         """Append a message to the log textedit widget."""
@@ -203,63 +276,95 @@ class ConnectODKDialog(QDialog):
         self.log_textedit.clear()
 
     def pre_process_form(self):
-        """Start progress bar and log immediately."""
-        self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Processing form, please wait...")
+        """Start submission fetching in a background thread with immediate UI feedback."""
+        self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Starting form processing...")
+        self.progress_bar.setRange(0, 0)  # Indeterminate mode
         self.progress_bar.show()
-        self.process_form()  # Direct call, no delay
+        QApplication.processEvents()  # Force UI update
 
-    def fetch_submissions(self, server_url, username, password, project_id, form_id):
-        """Fetch all submissions for the selected form using OData in a single request with logging."""
-        submissions = []
+        server_url = self.url_edit.text()
+        username = self.username_edit.text()
+        password = self.password_edit.text()
+        selected_project_name = self.project_combobox.currentText()
+        selected_form_name = self.form_combobox.currentText()
 
-        headers = {
-            'Accept': 'application/json'
-        }
+        selected_project_id = None
+        for project in self.projects:
+            if project['name'] == selected_project_name:
+                selected_project_id = project['id']
+                break
 
-        # Log immediately with timestamp and show progress bar
-        self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Initiating submission fetch...")
-        self.progress_bar.setRange(0, 0)  # Indeterminate during fetch
-        self.progress_bar.show()
+        if not selected_project_id:
+            self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] No project selected.")
+            self.progress_bar.hide()
+            return
 
         try:
-            # Construct OData URL without $top or $skip for full fetch
-            submissions_api_url = (
-                f"{server_url}/v1/projects/{project_id}/forms/{form_id}.svc/Submissions"
-                f"?%24expand=*"
-            )
-            self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Requesting: {submissions_api_url}")
-
-            # Make the request
-            response = requests.get(submissions_api_url, auth=(username, password), headers=headers)
-            response.raise_for_status()
-            data = response.json()
-
-            if not isinstance(data, dict):
-                raise Exception("Unexpected response format. Expected a dictionary.")
-
-            submissions = data.get('value', [])
-            total_count = len(submissions)
-
-            # Log result
-            self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Retrieved {total_count} submissions.")
-
-            # Update progress bar
-            if total_count == 0:
-                self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] No submissions found.")
-            self.progress_bar.setRange(0, 100)
-            self.progress_bar.setValue(100)
-
-        except requests.exceptions.RequestException as e:
+            form_id = self.get_form_id_from_name(selected_form_name, selected_project_id)
+        except Exception as e:
+            self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Error: {str(e)}")
             self.progress_bar.hide()
-            self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Error fetching submissions: {str(e)}")
-            raise Exception(f"Error occurred: {str(e)}")
+            return
 
+        # Create and start submission worker
+        self.submission_worker = SubmissionWorker(server_url, username, password, selected_project_id, form_id)
+        self.submission_worker.moveToThread(self.submission_thread)
+        self.submission_worker.progress.connect(self.update_progress)
+        self.submission_worker.log.connect(self.log_message)
+        self.submission_worker.result.connect(self.on_submissions_fetched)
+        self.submission_worker.error.connect(self.on_submission_error)
+        self.submission_worker.finished.connect(self.on_submission_finished)
+        self.submission_thread.started.connect(self.submission_worker.run)
+        self.submission_thread.start()
+
+    def update_progress(self, value):
+        """Update progress bar value."""
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(value)
+
+    def on_submissions_fetched(self, submissions):
+        """Handle fetched submissions and continue processing."""
+        try:
+            if not submissions:
+                self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] No submissions found.")
+                QMessageBox.warning(self, "No Submissions", "No submissions found for the selected form.")
+                return
+
+            with open('submissions.json', 'w') as f:
+                json.dump(submissions, f, indent=2)
+                self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Submissions saved to submissions.json")
+
+            geojson_data = self.convert_to_geojson(submissions, 'out.json')
+            self.add_geojson_to_map(geojson_data, self.form_combobox.currentText())
+
+        except Exception as e:
+            self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Error processing submissions: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error processing form: {str(e)}")
+
+    def on_submission_error(self, error_message):
+        """Handle errors from submission worker."""
+        self.log_message(error_message)
+        QMessageBox.critical(self, "Error", error_message.split("] ")[-1])
+
+    def on_submission_finished(self):
+        """Clean up after submission worker finishes."""
         self.progress_bar.hide()
-        self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Completed fetching {total_count} submissions.")
-        return submissions
+        self.submission_thread.quit()
+        self.submission_thread.wait()
+        self.submission_worker = None
+
+    def closeEvent(self, event):
+        """Handle dialog close event to clean up threads."""
+        if self.submission_thread.isRunning():
+            if self.submission_worker:
+                self.submission_worker.stop()
+                self.submission_worker.deleteLater()
+            self.submission_thread.quit()
+            self.submission_thread.wait()
+        super().closeEvent(event)
 
 
-
+ 
 
     def get_form_data(self):
         """Return the form data entered by the user."""
@@ -405,48 +510,6 @@ class ConnectODKDialog(QDialog):
       self.progress_bar.hide()
  
  
-    def process_form(self):
-        """Process the form, fetch submissions in batches, and convert them to GeoJSON."""
-        server_url = self.url_edit.text()
-        username = self.username_edit.text()
-        password = self.password_edit.text()
-        selected_project_name = self.project_combobox.currentText()
-        selected_form_name = self.form_combobox.currentText()
-
-        # Find the project ID from the list of projects
-        selected_project_id = None
-        for project in self.projects:
-            if project['name'] == selected_project_name:
-                selected_project_id = project['id']
-                break
-
-        if selected_project_id:
-            try:
-                form_id = self.get_form_id_from_name(selected_form_name, selected_project_id)
-
-                # Fetch submissions in batches
-                submissions = self.fetch_submissions(server_url, username, password, selected_project_id, form_id)
-
-                if not submissions:
-                    QMessageBox.warning(self, "No Submissions", "No submissions found for the selected form.")
-                    self.hide_progress()
-                    return
-
-                with open('submissions.json', 'w') as f:
-                    json.dump(submissions, f, indent=2)
-                    print(f"submissions data saved to submissions.json")
-
-                # Convert submissions to GeoJSON
-                geojson_data = self.convert_to_geojson(submissions, 'out.json')
-
-                # Add the GeoJSON data as a layer to the map
-                self.add_geojson_to_map(geojson_data, selected_form_name)
-
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Error processing form: {str(e)}")
-                self.hide_progress()
-
-
 
     def find_geometry(self, data):
         """
@@ -574,54 +637,7 @@ class ConnectODKDialog(QDialog):
         return geojson_data
  
 
-    def xadd_geojson_to_map(self, geojson_data, form_name):
-        """Add GeoJSON data as separate layers to the map based on geometry type."""
-        
-        # Remove empty properties
-        geojson_data = self.remove_empty_properties(geojson_data)
-        self.geo_data = geojson_data
-
-        # Split features by geometry type
-        geometry_types = {
-            "Point": [],
-            "Linear": [],
-            "Polygon": [],
-            # Add additional geometry types if needed
-        }
-
-        # Separate features by geometry type
-        for feature in geojson_data.get("features", []):
-            geometry_type = feature["geometry"]["type"]
-            if geometry_type == "LineString":
-                geometry_types["Linear"].append(feature)
-            elif geometry_type in geometry_types:
-                geometry_types[geometry_type].append(feature)
-        
-        # Create layers for each geometry type
-        for geom_type, features in geometry_types.items():
-            if not features:
-                continue  # Skip if no features for this geometry type
-            
-            # Create a GeoJSON string for this geometry type
-            geom_geojson_data = {
-                "type": "FeatureCollection",
-                "features": features
-            }
-            geom_geojson_str = json.dumps(geom_geojson_data)
-            
-            # Create a layer for this geometry type
-            vector_layer = QgsVectorLayer(geom_geojson_str, f"{form_name}_{geom_type}", "ogr")
-            
-            # Add the vector layer to the current map project
-            QgsProject.instance().addMapLayer(vector_layer)
-        
-        # Optionally zoom to the extent of all added layers
-        self.map_canvas.zoomToFullExtent()
-        self.map_canvas.refresh()
-        self.hide_progress()
-
-        print("GeoJSON data has been added to the map with separate layers for each geometry type.")
-
+ 
     def add_geojson_to_map(self, geojson_data, form_name):
         """Add GeoJSON data as separate layers to the map based on geometry type."""
         
