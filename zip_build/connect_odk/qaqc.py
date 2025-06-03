@@ -342,13 +342,14 @@ class ProcessGDBDialog(QDialog):
         except Exception as e:
             print(f"An error occurred: {e}")
         return None, None
-
+    
     def check_attributes(self, gdf, layer_name, unmatched_layers):
         """Validate attributes of a GeoDataFrame against specifications in the Excel file using fuzzy matching."""
         if not self.excel_file:
             self.log_message(f"No Excel file available for attribute validation of layer {layer_name}.")
             unmatched_layers.append(layer_name)
             return None, None
+        
         try:
             xl = pd.ExcelFile(self.excel_file, engine='openpyxl')
             sheet_names = xl.sheet_names
@@ -361,12 +362,14 @@ class ProcessGDBDialog(QDialog):
             self.log_message(f"Matched layer {layer_name} to sheet {matched_sheet} with similarity score {score}")
             specs_df = pd.read_excel(self.excel_file, sheet_name=matched_sheet, engine='openpyxl')
             required_cols = ['Attribute', 'Type']
+            print("specs_df", specs_df)
             if not all(col in specs_df.columns for col in required_cols):
                 self.log_message(f"Sheet {matched_sheet} missing required columns: {required_cols}")
                 return None, None
         except Exception as e:
             self.log_message(f"Error reading Excel sheet for layer {layer_name}: {str(e)}")
             return None, None
+
         issue_indices = set()
         issue_details = []
         type_mapping = {
@@ -383,8 +386,14 @@ class ProcessGDBDialog(QDialog):
         gdf_columns = [col for col in gdf.columns if col != "geometry"]
         required_fields = specs_df['Attribute'].tolist()
         missing_fields = [field for field in required_fields if field not in gdf_columns and specs_df[specs_df['Attribute'] == field]['Type'].iloc[0].lower() not in geometry_types]
+        
+        # Track if any layer-wide issues exist
+        has_layer_wide_issues = False
+        
         if missing_fields:
             issue_details.append((-1, "Missing Fields", f"Required fields missing: {', '.join(missing_fields)}", None, None))
+            has_layer_wide_issues = True
+
         for _, spec in specs_df.iterrows():
             field = spec['Attribute']
             expected_type = spec['Type']
@@ -394,11 +403,13 @@ class ProcessGDBDialog(QDialog):
                 continue
             if field not in gdf_columns:
                 issue_details.append((-1, "Missing Field", f"Field {field} is required but missing", None, None))
+                has_layer_wide_issues = True
                 continue
             actual_type = str(gdf[field].dtype)
             expected_pandas_type = type_mapping.get(expected_type, expected_type)
             if actual_type != expected_pandas_type:
                 issue_details.append((-1, "Incorrect Data Type", f"Field {field} has type {actual_type}, expected {expected_pandas_type}", None, None))
+                has_layer_wide_issues = True
             if gdf[field].isna().any():
                 na_indices = gdf[gdf[field].isna()].index.tolist()
                 for idx in na_indices:
@@ -421,10 +432,16 @@ class ProcessGDBDialog(QDialog):
                         issue_indices.add(idx)
                         value = gdf.loc[idx, field]
                         issue_details.append((idx, "Exceeds Max Length", f"Field {field} value {value} exceeds max length {max_length}", None, None))
-        if issue_indices:
-            return gdf.loc[list(issue_indices)], issue_details
-        return None, issue_details
 
+        # If there are layer-wide issues or feature-specific issues, return the full GeoDataFrame
+        if issue_details:  # Changed from `if issue_indices` to ensure layer-wide issues are captured
+            if has_layer_wide_issues or issue_indices:
+                # Return the full GeoDataFrame if there are any issues
+                return gdf, issue_details
+            return gdf.loc[list(issue_indices)], issue_details
+        return None, None
+
+ 
     def generate_summary_pdf(self, output_dir, layer_summary, total_layers, total_features, unmatched_layers):
         pdf = FPDF(orientation="L", unit="mm", format="A4")
         pdf.add_page()
@@ -528,6 +545,8 @@ class ProcessGDBDialog(QDialog):
                     line_issues, line_issue_details = self.check_sharp_turns_self_intersections(gdf)
                     short_lines, short_line_details = self.check_short_linear_features(gdf)
                     attribute_issues, attribute_issue_details = self.check_attributes(gdf, layer, unmatched_layers)
+                    print('attribute_issues',attribute_issues)
+                    print('attribute_issue_details',attribute_issue_details)
                     layer_summary[layer] = {
                         "duplicates": len(duplicate_pairs) if duplicate_pairs else 0,
                         "overlaps": len(overlap_pairs) if overlap_pairs else 0,
