@@ -564,7 +564,7 @@ class ProcessGDBDialog(QDialog):
                             duplicate_pairs_df = duplicate_pairs_df.drop_duplicates()
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
                             excel_file = os.path.join(self.output_folder, f"{layer}_duplicates.xlsx")
-                            with pd.ExcelWriter(excel_file) as writer:
+                            with pd.ExcelWriter(excel_file,engine="xlsxwriter") as writer:
                                 duplicate_pairs_df.to_excel(writer, sheet_name="Duplicate Pairs", index=False)
                                 all_features_df.to_excel(writer, sheet_name="All Features", index=False)
                             print(f"  - Unique duplicate pairs and all features saved to {excel_file}")
@@ -580,7 +580,7 @@ class ProcessGDBDialog(QDialog):
                             overlap_pairs_df = pd.DataFrame(overlap_pairs, columns=["Feature1", "Feature2", "Overlap Area (m²)"])
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
                             excel_file = os.path.join(self.output_folder, f"{layer}_overlaps.xlsx")
-                            with pd.ExcelWriter(excel_file) as writer:
+                            with pd.ExcelWriter(excel_file,engine="xlsxwriter") as writer:
                                 overlap_pairs_df.to_excel(writer, sheet_name="Overlap Pairs", index=False)
                                 all_features_df.to_excel(writer, sheet_name="All Features", index=False)
                             print(f"  - Overlapping pairs and all features saved to {excel_file}")
@@ -594,7 +594,7 @@ class ProcessGDBDialog(QDialog):
                             line_issue_details_df = line_issue_details_df[["feature_id", "FeatureIndex", "IssueType", "Angle", "x", "y"]]
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
                             excel_file = os.path.join(self.output_folder, f"{layer}_line_issues.xlsx")
-                            with pd.ExcelWriter(excel_file) as writer:
+                            with pd.ExcelWriter(excel_file,engine="xlsxwriter") as writer:
                                 line_issue_details_df.to_excel(writer, sheet_name="Line Issues", index=False)
                                 all_features_df.to_excel(writer, sheet_name="All Features", index=False)
                             print(f"  - Line issues and all features saved to {excel_file}")
@@ -606,7 +606,7 @@ class ProcessGDBDialog(QDialog):
                             short_line_details_df = pd.DataFrame(short_line_details, columns=["FeatureID", "Length (m)"])
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
                             excel_file = os.path.join(self.output_folder, f"{layer}_short_lines.xlsx")
-                            with pd.ExcelWriter(excel_file) as writer:
+                            with pd.ExcelWriter(excel_file,engine="xlsxwriter") as writer:
                                 short_line_details_df.to_excel(writer, sheet_name="Short Lines", index=False)
                                 all_features_df.to_excel(writer, sheet_name="All Features", index=False)
                             print(f"  - Short linear features and all features saved to {excel_file}")
@@ -625,7 +625,7 @@ class ProcessGDBDialog(QDialog):
                             attribute_issue_details_df = attribute_issue_details_df[["feature_id", "FeatureIndex", "IssueType", "Description", "x", "y"]]
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
                             excel_file = os.path.join(self.output_folder, f"{layer}_attribute_issues.xlsx")
-                            with pd.ExcelWriter(excel_file) as writer:
+                            with pd.ExcelWriter(excel_file,engine="xlsxwriter") as writer:
                                 attribute_issue_details_df.to_excel(writer, sheet_name="Attribute Issues", index=False)
                                 all_features_df.to_excel(writer, sheet_name="All Features", index=False)
                             print(f"  - Attribute issues and all features saved to {excel_file}")
