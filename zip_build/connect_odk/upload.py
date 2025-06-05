@@ -1,12 +1,13 @@
 import subprocess
 import sys
 import requests
-from PyQt5.QtWidgets import (QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox, 
-                             QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox, 
-                             QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QApplication,
-                             QTableWidgetItem, QSizePolicy)
-from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject
-from PyQt5.QtCore import QThread, pyqtSignal, QObject, QTimer
+from PyQt5.QtWidgets import (
+    QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox,
+    QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox,
+    QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QApplication,
+    QTableWidgetItem, QSizePolicy
+)
+from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
 from fuzzywuzzy import fuzz
 import json
 import geopandas as gpd
@@ -17,11 +18,7 @@ from shapely.geometry import mapping, shape
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from PyQt5.QtWidgets import (QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox, 
-                             QLineEdit, QComboBox, QHBoxLayout, QMessageBox, QGroupBox, QTextEdit, 
-                             QTableWidget, QTableWidgetItem, QSizePolicy)
-from PyQt5.QtCore import Qt, QSettings, QThread, pyqtSignal, QObject, QTimer
-
+from rapidfuzz import process, fuzz
 
 try:
     from shapely import force_2d
@@ -43,7 +40,6 @@ except ImportError:
                 for sub_geom in geom_dict["coordinates"]
             ]
         return shape(geom_dict)
-from rapidfuzz import process, fuzz
 
 
 class SearchableComboBox(QComboBox):
@@ -94,6 +90,7 @@ class SearchableComboBox(QComboBox):
                 super().setCurrentText(text)
         self.blockSignals(False)
 
+
 class Worker(QObject):
     """Worker object to run fetch_pcode_data in a background thread."""
     progress = pyqtSignal(int)
@@ -122,10 +119,10 @@ class Worker(QObject):
         return geom.buffer(distance_deg)
 
     def fetch_settlements_geojson(self):
-        """Fetch settlements GeoJSON from the server with model query parameter."""
+        """Fetch settlements GeoJSON from the server and force to EPSG:4326."""
         try:
             headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
-            self.log.emit(f"Fetching {self.parent_entity_name} GeoJSON...")
+            self.log.emit(f"Fetching {self.parent_entity_name} GeoJSON…")
             response = requests.get(
                 f"{self.url}/api/v1/data/geo/minimal",
                 headers=headers,
@@ -134,21 +131,31 @@ class Worker(QObject):
             )
             response.raise_for_status()
             geojson = response.json()
+
             if not isinstance(geojson, dict) or "features" not in geojson or geojson.get('type') != 'FeatureCollection':
                 raise ValueError("Invalid GeoJSON format")
+
             settlements_gdf = gpd.GeoDataFrame.from_features(geojson["features"])
-            self.log.emit(f"Loaded {len(settlements_gdf)} {self.parent_entity_name} features.")
+            # 1) Immediately force CRS to EPSG:4326 (WGS84) so intersection logic in 4326 works correctly
+            settlements_gdf.set_crs(epsg=4326, inplace=True)
+
+            self.log.emit(f"Loaded {len(settlements_gdf)} settlement features (CRS={settlements_gdf.crs}).")
             return settlements_gdf
+
         except Exception as e:
             self.log.emit(f"Error fetching {self.parent_entity_name} GeoJSON: {str(e)}")
             raise
+
 
     def process_pcode_batch(self, start, batch_indices, batch_codes, batch_num, total_items, batch_size):
         """Process a batch of pcode-based queries."""
         if not self._is_running:
             return 0, []
         try:
-            self.log.emit(f"Processing pcode batch {batch_num} ({start+1}–{min(start+batch_size, total_items)} of {total_items})")
+            self.log.emit(
+                f"Processing pcode batch {batch_num} "
+                f"({start+1}–{min(start+batch_size, total_items)} of {total_items})"
+            )
             response = requests.post(
                 f"{self.url}/api/v1/data/many/code",
                 headers={"Authorization": f"Bearer {self.token}", "x-access-token": self.token},
@@ -194,7 +201,12 @@ class Worker(QObject):
             return len(batch_codes), []
 
     def run(self):
-        """Fetch entity data with pcode matching and local GeoJSON intersection for unmatched rows."""
+        """
+        Fetch entity data with pcode matching, then local intersection:
+         - Force the layer‐derived GeoDataFrame self.gdf → EPSG:4326 before doing any intersection.
+         - For Points: buffer 1 km (≈0.009°) and do intersects normally.
+         - For Polygons: compute exact intersection areas and pick the settlement with the greatest overlap.
+        """
         try:
             if not self._is_running:
                 self.log.emit("Worker stopped before starting.")
@@ -202,12 +214,33 @@ class Worker(QObject):
                 self.finished.emit()
                 return
 
-            layer_fields = [f.name() for f in self.layer.fields()]
-            has_pcode = 'pcode' in layer_fields
-            self.log.emit(f"Pcode column {'found' if has_pcode else 'not found'} in layer.")
+            # 1) Ensure self.gdf exists (it was created with layer’s native CRS in reset_data())
+            if self.gdf is None:
+                self.log.emit("No GeoDataFrame available; aborting.")
+                self.result.emit({}, [])
+                self.finished.emit()
+                return
 
+            # 2) Record the original layer CRS SRID
             srid = self.layer.crs().postgisSrid()
             self.log.emit(f"Layer CRS SRID detected: {srid}")
+
+            # 3) Reproject self.gdf → EPSG:4326 (WGS84) so that geometry operations run correctly
+            try:
+                self.gdf = self.gdf.to_crs(epsg=4326)
+                self.log.emit("Reprojected layer GeoDataFrame to EPSG:4326 for intersection.")
+            except Exception as e:
+                self.log.emit(f"Error reprojecting layer to EPSG:4326: {e}")
+
+            # 4) Populate “geojson” column from the reprojected geometry
+            self.gdf["geojson"] = self.gdf.geometry.apply(
+                lambda geom: geom.__geo_interface__ if geom is not None else None
+            )
+
+            # 5) Check for “pcode” column
+            layer_fields = [f.name() for f in self.layer.fields()]
+            has_pcode = "pcode" in layer_fields
+            self.log.emit(f"Pcode column {'found' if has_pcode else 'not found'} in layer.")
 
             pcode_entity_data = {}
             valid_feature_indices = []
@@ -217,7 +250,7 @@ class Worker(QObject):
             processed_items = 0
             total_items = len(self.gdf)
 
-            # Step 1: Pcode matching
+            # ── STEP 1: Pcode matching ─────────────────────────────────────
             if has_pcode:
                 index_to_pcode = [
                     (row_idx, row["pcode"])
@@ -230,12 +263,20 @@ class Worker(QObject):
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         futures = []
                         for start in range(0, len(index_to_pcode), batch_size):
-                            batch_indices = index_to_pcode[start:start + batch_size]
+                            batch_indices = index_to_pcode[start : start + batch_size]
                             batch_codes = [p for _, p in batch_indices]
-                            batch_num = start // batch_size + 1
-                            futures.append(executor.submit(
-                                self.process_pcode_batch, start, batch_indices, batch_codes, batch_num, len(index_to_pcode), batch_size
-                            ))
+                            batch_num = (start // batch_size) + 1
+                            futures.append(
+                                executor.submit(
+                                    self.process_pcode_batch,
+                                    start,
+                                    batch_indices,
+                                    batch_codes,
+                                    batch_num,
+                                    len(index_to_pcode),
+                                    batch_size,
+                                )
+                            )
 
                         for future in as_completed(futures):
                             if not self._is_running:
@@ -248,34 +289,74 @@ class Worker(QObject):
                                     pcode_entity_data[row_idx] = data
                                     valid_feature_indices.append(row_idx)
                                 progress = int((processed_items / total_items) * 100)
-                                self.progress.emit(min(progress, 50))  # Up to 50% for pcode
+                                self.progress.emit(min(progress, 50))  # up to 50% for pcode
 
-            # Step 2: Local GeoJSON intersection for unmatched rows
+            # ── STEP 2: Local intersection for unmatched rows ─────────────
+            # 2.1: Build a list of unmatched indices where geometry is non‐null
             unmatched_indices = [
-                row_idx for row_idx, _ in self.gdf.iterrows()
+                row_idx
+                for row_idx, _ in self.gdf.iterrows()
                 if row_idx not in pcode_entity_data and self.gdf.loc[row_idx, "geojson"] is not None
             ]
-            self.log.emit(f"Processing {len(unmatched_indices)} unmatched rows with local 5 km buffered geometry intersection.")
+            self.log.emit(f"Processing {len(unmatched_indices)} unmatched rows with local intersection.")
 
             if unmatched_indices:
-                # Fetch GeoJSON
+                # 2.2: Fetch settlements (already forced to EPSG:4326 in fetch_settlements_geojson())
                 settlements_gdf = self.fetch_settlements_geojson()
 
-                # Prepare unmatched geometries with 5 km buffer
-                unmatched_gdf = self.gdf.loc[unmatched_indices].copy()
-                unmatched_gdf['geometry'] = unmatched_gdf['geojson'].apply(lambda x: shape(x) if x else None)
-                unmatched_gdf = unmatched_gdf[unmatched_gdf['geometry'].notnull()]
-                unmatched_gdf['geometry'] = unmatched_gdf['geometry'].apply(self.buffer_geometry)
-                unmatched_gdf = gpd.GeoDataFrame(unmatched_gdf, geometry='geometry', crs="EPSG:4326")
+                # 2.3: Build a GeoDataFrame of all unmatched features
+                #      We will separate point‐based buffering from polygon overlap logic.
+                unmatched_gdf_full = self.gdf.loc[unmatched_indices].copy()
+                unmatched_gdf_full["geometry"] = unmatched_gdf_full["geojson"].apply(
+                    lambda x: shape(x) if x else None
+                )
+                unmatched_gdf_full = unmatched_gdf_full[
+                    unmatched_gdf_full["geometry"].notnull()
+                ].reset_index(drop=False)
+                # Now `unmatched_gdf_full` has a column “index” that corresponds to original row_idx
 
-                if not unmatched_gdf.empty:
-                    # Perform spatial intersection
-                    self.log.emit("Performing local spatial intersection...")
-                    intersections = gpd.sjoin(unmatched_gdf, settlements_gdf, how="left", predicate="intersects")
-                    for idx, row in intersections.iterrows():
-                        if not pd.isna(row['index_right']):
-                            row_idx = idx
-                            settlement = settlements_gdf.loc[row['index_right']]
+                # 2.4: Split unmatched into points vs polygons
+                point_mask = unmatched_gdf_full.geometry.geom_type.isin(["Point", "MultiPoint"])
+                polygon_mask = unmatched_gdf_full.geometry.geom_type.isin(["Polygon",  "MultiPolygon"])
+                line_mask    = unmatched_gdf_full.geometry.geom_type.isin(["LineString", "MultiLineString"])
+
+                self.log.emit(f" {unmatched_gdf_full.geometry.geom_type} .......")
+
+                points_gdf = unmatched_gdf_full[point_mask].copy()
+                polygons_gdf = unmatched_gdf_full[polygon_mask].copy()
+                lines_gdf    = unmatched_gdf_full[line_mask].copy()
+
+
+                # ── 2A: Handle point‐based intersection via 1 km buffer ──
+                if not points_gdf.empty:
+                    # Buffer each point by ~1 km ≈ 1/111 degrees
+                    points_gdf["buffered_geom"] = points_gdf.geometry.buffer(1.0 / 111.0)
+
+                    # For all point buffers, do a fast spatial index lookup first, then intersect
+                    for idx_row, row in points_gdf.iterrows():
+                        if not self._is_running:
+                            break
+
+                        original_idx = row["index"]  # original index in self.gdf
+                        buf = row["buffered_geom"]
+
+                        # First find candidate settlements using bounding‐box
+                        candidate_idx = list(
+                            settlements_gdf.sindex.intersection(buf.bounds)
+                        )
+                        if not candidate_idx:
+                            continue  # no intersecting settlement → skip
+
+                        best_intersect_id = None
+                        for cand in candidate_idx:
+                            settlement_geom = settlements_gdf.geometry.iloc[cand]
+                            if buf.intersects(settlement_geom):
+                                # We only need any intersect for points; take the first one
+                                best_intersect_id = cand
+                                break
+
+                        if best_intersect_id is not None:
+                            settlement = settlements_gdf.iloc[best_intersect_id]
                             parent = self.parent_entity_name.lower()
                             if parent == "settlement":
                                 key = "settlement_id"
@@ -287,27 +368,158 @@ class Worker(QObject):
                                 key = "county_id"
                             else:
                                 key = None
-                            if key and settlement.get("id"):
-                                data = {
-                                    key: int(settlement["id"]) if settlement.get("id") is not None else None,
-                                    **({"settlement_id": int(settlement.get("settlement_id")) if settlement.get("settlement_id") is not None else None} if key != "settlement_id" else {}),
-                                    **({"ward_id": int(settlement.get("ward_id")) if settlement.get("ward_id") is not None else None} if key != "ward_id" else {}),
-                                    **({"subcounty_id": int(settlement.get("subcounty_id")) if settlement.get("subcounty_id") is not None else None} if key != "subcounty_id" else {}),
-                                    **({"county_id": int(settlement.get("county_id")) if settlement.get("county_id") is not None else None} if key != "county_id" else {})
-                                }
+
+                            if key and settlement.get("id") is not None:
+                                data = {key: int(settlement["id"])}
+                                if parent != "settlement" and settlement.get("settlement_id") is not None:
+                                    data["settlement_id"] = int(settlement["settlement_id"])
+                                if parent != "ward" and settlement.get("ward_id") is not None:
+                                    data["ward_id"] = int(settlement["ward_id"])
+                                if parent != "subcounty" and settlement.get("subcounty_id") is not None:
+                                    data["subcounty_id"] = int(settlement["subcounty_id"])
+                                if parent != "county" and settlement.get("county_id") is not None:
+                                    data["county_id"] = int(settlement["county_id"])
+
                                 with lock:
-                                    pcode_entity_data[row_idx] = data
-                                    valid_feature_indices.append(row_idx)
+                                    pcode_entity_data[original_idx] = data
+                                    valid_feature_indices.append(original_idx)
                                     processed_items += 1
-                                    self.log.emit(f"Assigned {parent}-based data for index {row_idx}: {data}")
-                        else:
-                            self.log.emit(f"No intersection for buffered geometry at index {idx}")
+                                    self.log.emit(
+                                        f"(Point) Assigned {parent}-based data for index {original_idx}: {data}"
+                                    )
 
-                    progress = int((processed_items / total_items) * 100)
-                    self.progress.emit(progress)  # Up to 100% for intersection
+                # ── 2B: Handle polygon‐based intersection by “maximum overlap area” ──
+                if not polygons_gdf.empty:
+                    # Build a spatial index on settlements for faster bounding‐box lookups
+                    settlement_sindex = settlements_gdf.sindex
 
+                    for idx_row, row in polygons_gdf.iterrows():
+                        if not self._is_running:
+                            break
+
+                        original_idx = row["index"]
+                        poly_geom = row["geometry"]
+
+                        # 2B.1: Find candidate settlements by bounding‐box intersection
+                        candidate_idx = list(settlement_sindex.intersection(poly_geom.bounds))
+                        if not candidate_idx:
+                            continue  # no intersecting settlement → skip
+
+                        # 2B.2: Now compute exact intersection areas with each candidate
+                        best_idx = None
+                        best_area = 0.0
+                        for cand in candidate_idx:
+                            settlement_geom = settlements_gdf.geometry.iloc[cand]
+                            if not settlement_geom.intersects(poly_geom):
+                                continue
+                            intersect_geom = settlement_geom.intersection(poly_geom)
+                            if not intersect_geom.is_empty:
+                                area = intersect_geom.area
+                                if area > best_area:
+                                    best_area = area
+                                    best_idx = cand
+
+                        # 2B.3: If best_idx is not None, assign the parent from that settlement
+                        if best_idx is not None:
+                            settlement = settlements_gdf.iloc[best_idx]
+                            parent = self.parent_entity_name.lower()
+                            if parent == "settlement":
+                                key = "settlement_id"
+                            elif parent == "ward":
+                                key = "ward_id"
+                            elif parent == "subcounty":
+                                key = "subcounty_id"
+                            elif parent == "county":
+                                key = "county_id"
+                            else:
+                                key = None
+
+                            if key and settlement.get("id") is not None:
+                                data = {key: int(settlement["id"])}
+                                if parent != "settlement" and settlement.get("settlement_id") is not None:
+                                    data["settlement_id"] = int(settlement["settlement_id"])
+                                if parent != "ward" and settlement.get("ward_id") is not None:
+                                    data["ward_id"] = int(settlement["ward_id"])
+                                if parent != "subcounty" and settlement.get("subcounty_id") is not None:
+                                    data["subcounty_id"] = int(settlement["subcounty_id"])
+                                if parent != "county" and settlement.get("county_id") is not None:
+                                    data["county_id"] = int(settlement["county_id"])
+
+                                with lock:
+                                    pcode_entity_data[original_idx] = data
+                                    valid_feature_indices.append(original_idx)
+                                    processed_items += 1
+                                    self.log.emit(
+                                        f"(Polygon) Assigned {parent}-based data for index {original_idx} "
+                                        f"with overlap area {best_area:.6f}: {data}"
+                                    )
+
+
+                # ── 2B: Handle line‐based intersection via plain intersects ──
+                if not lines_gdf.empty:
+                    # Build a spatial index on settlements (just once)
+                    settlement_sindex = settlements_gdf.sindex
+
+                    for idx_row, row in lines_gdf.iterrows():
+                        if not self._is_running:
+                            break
+
+                        original_idx = row["index"]       # keep track of the original index
+                        line_geom    = row["geometry"]    # this is the LineString/MultiLineString
+
+                        # 1) Find candidate settlements by bounding‐box intersection
+                        candidate_idx = list(settlement_sindex.intersection(line_geom.bounds))
+                        if not candidate_idx:
+                            # no settlement’s bbox intersects → skip
+                            continue
+
+                        # 2) Of those candidates, pick the first one that truly intersects
+                        matched_settlement = None
+                        for cand in candidate_idx:
+                            settlement_geom = settlements_gdf.geometry.iloc[cand]
+                            if line_geom.intersects(settlement_geom):
+                                matched_settlement = settlements_gdf.iloc[cand]
+                                break
+
+                        if matched_settlement is not None:
+                            parent = self.parent_entity_name.lower()
+                            if parent == "settlement":
+                                key = "settlement_id"
+                            elif parent == "ward":
+                                key = "ward_id"
+                            elif parent == "subcounty":
+                                key = "subcounty_id"
+                            elif parent == "county":
+                                key = "county_id"
+                            else:
+                                key = None
+
+                            if key and matched_settlement.get("id") is not None:
+                                data = {key: int(matched_settlement["id"])}
+                                # copy up the other parent‐IDs if needed:
+                                if parent != "settlement" and matched_settlement.get("settlement_id") is not None:
+                                    data["settlement_id"] = int(matched_settlement["settlement_id"])
+                                if parent != "ward" and matched_settlement.get("ward_id") is not None:
+                                    data["ward_id"] = int(matched_settlement["ward_id"])
+                                if parent != "subcounty" and matched_settlement.get("subcounty_id") is not None:
+                                    data["subcounty_id"] = int(matched_settlement["subcounty_id"])
+                                if parent != "county" and matched_settlement.get("county_id") is not None:
+                                    data["county_id"] = int(matched_settlement["county_id"])
+
+                                with lock:
+                                    pcode_entity_data[original_idx] = data
+                                    valid_feature_indices.append(original_idx)
+                                    processed_items += 1
+                                    self.log.emit(
+                                        f"(Line) Assigned {parent}-based data for index {original_idx}: {data}"
+                                    )
+
+            # ── FINALIZE ─────────────────────────────────────────────────
             if pcode_entity_data:
-                self.log.emit(f"Data fetched successfully for {len(valid_feature_indices)} rows with parent entity '{self.parent_entity_name}'.")
+                self.log.emit(
+                    f"Data fetched successfully for {len(valid_feature_indices)} rows "
+                    f"with parent entity '{self.parent_entity_name}'."
+                )
             else:
                 self.log.emit(f"No data fetched for parent entity '{self.parent_entity_name}'.")
 
@@ -317,6 +529,7 @@ class Worker(QObject):
         except Exception as e:
             self.log.emit(f"Error fetching entity data: {str(e)}")
             self.finished.emit()
+ 
 
 class WorkerLocalGeoJSON(QObject):
     """Worker object to fetch settlements GeoJSON and perform local intersections."""
@@ -349,21 +562,21 @@ class WorkerLocalGeoJSON(QObject):
         """Fetch settlements GeoJSON from the server."""
         try:
             headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
-            self.log.emit("Fetching settlements GeoJSON...")
-            #response = requests.get(f"{self.url}/api/v1/data/geo/minimal", headers=headers, timeout=30)
+            self.log.emit("Fetching settlements GeoJSON…")
             response = requests.get(
                 f"{self.url}/api/v1/data/geo/minimal",
                 headers=headers,
                 params={'model': self.parent_entity_name},
                 timeout=30
             )
-
             response.raise_for_status()
             geojson = response.json()
             if not isinstance(geojson, dict) or "features" not in geojson:
                 raise ValueError("Invalid GeoJSON format")
             settlements_gdf = gpd.GeoDataFrame.from_features(geojson["features"])
-            self.log.emit(f"Loaded {len(settlements_gdf)} settlement features.")
+            # Force CRS to WGS84 (EPSG:4326)
+            settlements_gdf.set_crs(epsg=4326, inplace=True)
+            self.log.emit(f"Loaded {len(settlements_gdf)} settlement features (CRS={settlements_gdf.crs}).")
             return settlements_gdf
         except Exception as e:
             self.log.emit(f"Error fetching settlements GeoJSON: {str(e)}")
@@ -374,7 +587,10 @@ class WorkerLocalGeoJSON(QObject):
         if not self._is_running:
             return 0, []
         try:
-            self.log.emit(f"Processing pcode batch {batch_num} ({start+1}–{min(start+batch_size, total_items)} of {total_items})")
+            self.log.emit(
+                f"Processing pcode batch {batch_num} "
+                f"({start+1}–{min(start+batch_size, total_items)} of {total_items})"
+            )
             response = requests.post(
                 f"{self.url}/api/v1/data/many/code",
                 headers={"Authorization": f"Bearer {self.token}", "x-access-token": self.token},
@@ -418,9 +634,7 @@ class WorkerLocalGeoJSON(QObject):
         except Exception as e:
             self.log.emit(f"Batch {batch_num} error: {str(e)}")
             return len(batch_codes), []
-        
 
-        
     def run(self):
         """Fetch entity data with pcode matching and local buffered geometry intersection."""
         try:
@@ -460,9 +674,15 @@ class WorkerLocalGeoJSON(QObject):
                         for start in range(0, len(index_to_pcode), batch_size):
                             batch_indices = index_to_pcode[start:start + batch_size]
                             batch_codes = [p for _, p in batch_indices]
-                            batch_num = start // batch_size + 1
+                            batch_num = (start // batch_size) + 1
                             futures.append(executor.submit(
-                                self.process_pcode_batch, start, batch_indices, batch_codes, batch_num, len(index_to_pcode), batch_size
+                                self.process_pcode_batch,
+                                start,
+                                batch_indices,
+                                batch_codes,
+                                batch_num,
+                                len(index_to_pcode),
+                                batch_size
                             ))
 
                         for future in as_completed(futures):
@@ -486,10 +706,10 @@ class WorkerLocalGeoJSON(QObject):
             self.log.emit(f"Processing {len(unmatched_indices)} unmatched rows with local 5 km buffered geometry intersection.")
 
             if unmatched_indices:
-                # Fetch settlements GeoJSON
+                # Fetch settlements GeoJSON (forced to EPSG:4326)
                 settlements_gdf = self.fetch_settlements_geojson()
 
-                # Prepare unmatched geometries with 5 km buffer
+                # Prepare unmatched geometries with 5 km buffer (in EPSG:4326)
                 unmatched_gdf = self.gdf.loc[unmatched_indices].copy()
                 unmatched_gdf['geometry'] = unmatched_gdf['geojson'].apply(lambda x: shape(x) if x else None)
                 unmatched_gdf = unmatched_gdf[unmatched_gdf['geometry'].notnull()]
@@ -497,8 +717,7 @@ class WorkerLocalGeoJSON(QObject):
                 unmatched_gdf = gpd.GeoDataFrame(unmatched_gdf, geometry='geometry', crs="EPSG:4326")
 
                 if not unmatched_gdf.empty:
-                    # Perform spatial intersection
-                    self.log.emit("Performing local spatial intersection...")
+                    self.log.emit("Performing local spatial intersection…")
                     intersections = gpd.sjoin(unmatched_gdf, settlements_gdf, how="left", predicate="intersects")
                     for idx, row in intersections.iterrows():
                         if not pd.isna(row['index_right']):
@@ -518,10 +737,10 @@ class WorkerLocalGeoJSON(QObject):
                             if key and settlement.get("id"):
                                 data = {
                                     key: int(settlement["id"]) if settlement.get("id") is not None else None,
-                                    **({"settlement_id": int(settlement.get("settlement_id")) if settlement.get("settlement_id") is not None else None} if key != "settlement_id" else {}),
-                                    **({"ward_id": int(settlement.get("ward_id")) if settlement.get("ward_id") is not None else None} if key != "ward_id" else {}),
-                                    **({"subcounty_id": int(settlement.get("subcounty_id")) if settlement.get("subcounty_id") is not None else None} if key != "subcounty_id" else {}),
-                                    **({"county_id": int(settlement.get("county_id")) if settlement.get("county_id") is not None else None} if key != "county_id" else {})
+                                    **({"settlement_id": int(settlement.get("settlement_id"))} if key != "settlement_id" else {}),
+                                    **({"ward_id": int(settlement.get("ward_id"))} if key != "ward_id" else {}),
+                                    **({"subcounty_id": int(settlement.get("subcounty_id"))} if key != "subcounty_id" else {}),
+                                    **({"county_id": int(settlement.get("county_id"))} if key != "county_id" else {}),
                                 }
                                 with lock:
                                     pcode_entity_data[row_idx] = data
@@ -543,11 +762,8 @@ class WorkerLocalGeoJSON(QObject):
             self.finished.emit()
 
         except Exception as e:
-            self.log.emit(f"Error fetching entity data: {str(e)}")
+            self.log.emit(f"Error fetching entity data 1: {str(e)}")
             self.finished.emit()
-
- 
-
 
 
 class FieldMatchingWorker(QObject):
@@ -562,11 +778,12 @@ class FieldMatchingWorker(QObject):
         self.layer = layer
         self.entity = entity
         self.pcode_fields = pcode_fields
+
     def stop(self):
-            """Signal the worker to stop execution."""
-            self._is_running = False
-            self.log.emit("Field matching worker stopped.")
-            
+        """Signal the worker to stop execution."""
+        self._is_running = False
+        self.log.emit("Field matching worker stopped.")
+
     def run(self):
         """Perform field matching in the background, picking the best match per API field."""
         try:
@@ -801,9 +1018,6 @@ class KesMISDialog(QDialog):
             self.mapping_table.setRowHidden(row, not matches)
         self.log_message(f"Filtered table with query: '{text}'" if text else "Cleared table filter")
 
-
- 
-
     def clear_log(self):
         """Clear all messages in the log window."""
         self.log_textedit.clear()
@@ -822,35 +1036,54 @@ class KesMISDialog(QDialog):
             return value
         else:
             return str(value)
-
+ 
     def reset_data(self):
-        """Clear data when the layer changes and re-fetch parent IDs if a parent is selected."""
+        """
+        Clear data when the layer changes and re‐fetch parent IDs if a parent is selected.
+        Now ensures self.gdf is created with the layer’s true CRS.
+        """
         self.pcode_entity_data = {}
         self.valid_feature_indices = []
         self.field_mapping = {}
         self.mapping_table.setRowCount(0)
         self.submit_button.setEnabled(False)
-        
+
         layer = self.layer_combo.currentData()
         if layer:
             try:
-                self.gdf = gpd.GeoDataFrame.from_features([
+                # 1) Grab the layer’s native SRID
+                srid = layer.crs().postgisSrid()
+
+                # 2) Build a list of GeoJSON‐like feature dicts exactly as before
+                features = [
                     {
                         "type": "Feature",
                         "geometry": json.loads(f.geometry().asJson()) if f.geometry() else None,
-                        "properties": {field: self._convert_to_serializable(f[field]) for field in [f.name() for f in layer.fields()]}
-                    } for f in layer.getFeatures()
-                ])
+                        "properties": {
+                            field: self._convert_to_serializable(f[field])
+                            for field in [fld.name() for fld in layer.fields()]
+                        }
+                    }
+                    for f in layer.getFeatures()
+                ]
+
+                # 3) Create GeoDataFrame.from_features AND assign the layer’s CRS:
+                #    so self.gdf.crs == “EPSG:<layer_srid>”
+                self.gdf = gpd.GeoDataFrame.from_features(features, crs=f"EPSG:{srid}")
                 if self.gdf.empty:
                     self.gdf = None
                     self.log_message("Selected layer contains no features.")
                     QMessageBox.warning(self, "No Features", "The selected layer contains no features.")
                     return
+
+                # 4) Ensure there is always a “code” column (generate if absent)
                 if "code" not in self.gdf.columns:
                     self.gdf["code"] = [shortuuid.ShortUUID().random(length=6) for _ in range(len(self.gdf))]
                     self.log_message("Generated unique codes for all features.")
-                self.gdf["geojson"] = self.gdf.geometry.apply(lambda geom: self._convert_to_serializable(geom.__geo_interface__) if geom else None)
-                self.log_message("Cached GeoDataFrame for new layer.")
+
+                # 5) Defer setting “geojson” until we know the layer is reprojected to 4326 in the worker.
+                self.gdf["geojson"] = None
+                self.log_message(f"Cached GeoDataFrame for new layer (CRS=EPSG:{srid}).")
             except Exception as e:
                 self.gdf = None
                 self.log_message(f"Error creating GeoDataFrame: {str(e)}")
@@ -859,15 +1092,13 @@ class KesMISDialog(QDialog):
         else:
             self.gdf = None
             self.log_message("No valid layer selected.")
-        
+
         self.log_message("Cleared pcode data and field mappings due to layer change.")
-        
+
         if self.parent_combo.currentText():
             self.start_fetch_pcode_data()
 
-
-
-
+ 
     def start_fetch_pcode_data(self):
         """Start fetching pcode data in a background thread."""
         if not self.layer_combo.currentData() or not self.parent_combo.currentText():
@@ -910,7 +1141,6 @@ class KesMISDialog(QDialog):
         self.thread.started.connect(self.worker.run)
         self.thread.start()
 
-
     def on_fetch_pcode_data_finished(self, pcode_entity_data, valid_feature_indices):
         """Handle results from background worker."""
         self.pcode_entity_data = pcode_entity_data
@@ -940,7 +1170,7 @@ class KesMISDialog(QDialog):
                 return
 
             self._login_in_progress = True
-            self.log_message("Initiating login...")
+            self.log_message("Initiating login…")
             self.progress_bar.setVisible(True)
             self.progress_bar.setRange(0, 0)  # Set indeterminate mode
             self.login_button.setEnabled(False)  # Disable login button
@@ -961,7 +1191,7 @@ class KesMISDialog(QDialog):
                 QMessageBox.critical(self, "Input Error", "Server URL must start with http:// or https://")
                 return
 
-            self.log_message("Contacting server...")
+            self.log_message("Contacting server…")
             login_url = f"{url}/api/auth/signin"
             try:
                 response = requests.post(
@@ -983,7 +1213,7 @@ class KesMISDialog(QDialog):
                 QMessageBox.critical(self, "Server Error", f"Server returned an error: {str(e)}")
                 return
 
-            self.log_message("Validating credentials...")
+            self.log_message("Validating credentials…")
             if response.status_code == 200:
                 data = response.json()
                 self.token = data.get("data")
@@ -1000,9 +1230,9 @@ class KesMISDialog(QDialog):
                     self.save_credentials_to_settings()
 
                 # Update UI
-                self.log_message("Populating layers...")
+                self.log_message("Populating layers…")
                 self.populate_layers()
-                self.log_message("Fetching entities...")
+                self.log_message("Fetching entities…")
                 self.fetch_entities(url)
                 self.layer_combo.setEnabled(True)
                 self.parent_combo.setEnabled(True)
@@ -1052,7 +1282,10 @@ class KesMISDialog(QDialog):
                 self.layer_combo.addItem(layer.name(), layer)
                 layer_fields = [f.name() for f in layer.fields()]
                 if "code" not in layer_fields:
-                    self.log_message(f"Layer '{layer.name()}' does not have a 'code' column. Unique codes will be generated using shortid.")
+                    self.log_message(
+                        f"Layer '{layer.name()}' does not have a 'code' column. "
+                        "Unique codes will be generated using shortid."
+                    )
         self.layer_combo.setEnabled(True)
 
     def fetch_entities(self, base_url):
@@ -1063,7 +1296,7 @@ class KesMISDialog(QDialog):
                 "x-access-token": self.token
             }
             response = requests.get(f"{base_url}/api/v1/models/list", headers=headers)
-            
+
             if response.status_code == 200:
                 data = response.json()
                 self.api_entities = data.get("models", [])
@@ -1080,7 +1313,6 @@ class KesMISDialog(QDialog):
         except Exception as e:
             self.log_message(f"Error fetching entities: {str(e)}")
 
-  
     def match_fields(self):
         """Start field matching in a background thread."""
         try:
@@ -1152,8 +1384,6 @@ class KesMISDialog(QDialog):
         QTimer.singleShot(100, lambda: self.progress_bar.setValue(100))
         self.filter_table(self.search_input.text())
 
-
-
     def on_field_matching_worker_finished(self):
         """Clean up after field matching worker finishes."""
         self.layer_combo.setEnabled(True)
@@ -1174,7 +1404,6 @@ class KesMISDialog(QDialog):
                 self._full_table_data[row] = (layer_field, api_field if api_field != "-" else "", score)
                 break
 
-
     @staticmethod
     def to_2d(geom):
         """Convert geometry to 2D by dropping Z dimension."""
@@ -1190,7 +1419,6 @@ class KesMISDialog(QDialog):
             return None
         return value
 
- 
     def submit_features(self):
         """Submit features to API in batches of 100 with progress updates."""
         try:
@@ -1276,7 +1504,7 @@ class KesMISDialog(QDialog):
             for start in range(0, total, batch_size):
                 batch = features[start:start + batch_size]
                 batch_num = start // batch_size + 1
-                self.log_message(f"Submitting batch {batch_num} ({start+1}–{min(start+batch_size, total)} of {total})...")
+                self.log_message(f"Submitting batch {batch_num} ({start+1}–{min(start+batch_size, total)} of {total})…")
                 try:
                     resp = requests.post(
                         f"{url}/api/v1/data/import/upsert",
