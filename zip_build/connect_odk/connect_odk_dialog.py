@@ -733,10 +733,15 @@ class ConnectODKDialog(QDialog):
         # Separate features by geometry type
         for feature in geojson_data.get("features", []):
             geometry_type = feature["geometry"]["type"]
-            if geometry_type == "LineString":
+            if geometry_type in ["LineString", "MultiLineString"]:
                 geometry_types["Linear"].append(feature)
-            elif geometry_type in geometry_types:
-                geometry_types[geometry_type].append(feature)
+            elif geometry_type in ["Point", "MultiPoint"]:
+                geometry_types["Point"].append(feature)
+            elif geometry_type in ["Polygon", "MultiPolygon"]:
+                geometry_types["Polygon"].append(feature)
+            else:
+                # For any other geometry types, add to Linear as fallback
+                geometry_types["Linear"].append(feature)
         
         # Create layers for each geometry type
         for geom_type, features in geometry_types.items():
