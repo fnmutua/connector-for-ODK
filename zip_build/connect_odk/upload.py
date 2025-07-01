@@ -1,6 +1,8 @@
 import subprocess
 import sys
 import requests
+import os
+from datetime import datetime
 from PyQt5.QtWidgets import (
     QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox,
     QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox,
@@ -12,7 +14,7 @@ from fuzzywuzzy import fuzz
 import json
 import geopandas as gpd
 import pandas as pd
-from qgis.core import QgsVectorLayer, QgsProject
+from qgis.core import QgsVectorLayer, QgsProject, QgsDataSourceUri
 import shortuuid
 from shapely.geometry import mapping, shape
 import threading
@@ -20,8 +22,77 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from rapidfuzz import process, fuzz
 
+def validate_and_repair_geometry(geom, tolerance=1e-8):
+    """
+    Validate and repair geometry to handle TopologyException errors.
+    
+    Args:
+        geom: Shapely geometry object
+        tolerance: Tolerance for coordinate snapping
+    
+    Returns:
+        Repaired geometry or None if repair fails
+    """
+    if geom is None:
+        return None
+    
+    try:
+        # First try to make the geometry valid
+        if not geom.is_valid:
+            geom = make_valid(geom)
+            if geom is None:
+                return None
+        
+        # Apply coordinate snapping to fix precision issues
+        if hasattr(geom, 'simplify'):
+            geom = geom.simplify(tolerance, preserve_topology=True)
+        
+        # Final validation check
+        if geom.is_valid and not geom.is_empty:
+            return geom
+        else:
+            return None
+            
+    except Exception as e:
+        # If all else fails, try to create a bounding box as fallback
+        try:
+            if hasattr(geom, 'bounds'):
+                minx, miny, maxx, maxy = geom.bounds
+                return box(minx, miny, maxx, maxy)
+        except:
+            pass
+        return None
+
+def add_geojson_to_map(filepath, layer_name):
+    """
+    Add a GeoJSON file as a layer to the QGIS map.
+    
+    Args:
+        filepath: Path to the GeoJSON file
+        layer_name: Name for the layer in QGIS
+    
+    Returns:
+        QgsVectorLayer object if successful, None otherwise
+    """
+    try:
+        # Create the layer from the GeoJSON file
+        layer = QgsVectorLayer(filepath, layer_name, "ogr")
+        
+        if layer.isValid():
+            # Add the layer to the project
+            QgsProject.instance().addMapLayer(layer)
+            return layer
+        else:
+            return None
+            
+    except Exception as e:
+        print(f"Error adding GeoJSON to map: {str(e)}")
+        return None
+
 try:
     from shapely import force_2d
+    from shapely.validation import make_valid
+    from shapely.geometry import box
 except ImportError:
     def force_2d(geom):
         """Fallback to convert geometry to 2D by dropping Z coordinate."""
@@ -40,6 +111,18 @@ except ImportError:
                 for sub_geom in geom_dict["coordinates"]
             ]
         return shape(geom_dict)
+    
+    def make_valid(geom):
+        """Fallback make_valid function."""
+        if geom is None:
+            return None
+        try:
+            # Try to fix common issues
+            if hasattr(geom, 'buffer'):
+                return geom.buffer(0)
+            return geom
+        except:
+            return None
 
 
 class SearchableComboBox(QComboBox):
@@ -128,19 +211,56 @@ class Worker(QObject):
     def fetch_settlements_geojson(self):
         """Fetch settlements GeoJSON from the server and force to EPSG:4326."""
         try:
-            headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
-            self.log.emit(f"Fetching {self.parent_entity_name} GeoJSON…")
-            response = requests.get(
-                f"{self.url}/api/v1/data/geo/minimal",
-                headers=headers,
-                params={'model': self.parent_entity_name},
-                timeout=30
-            )
-            response.raise_for_status()
-            geojson = response.json()
+            # Check if we should use a local file
+            if hasattr(self, 'use_local_file') and self.use_local_file and hasattr(self, 'local_filepath'):
+                self.log.emit(f"Using local file: {self.local_filepath}")
+                with open(self.local_filepath, 'r', encoding='utf-8') as f:
+                    geojson = json.load(f)
+            else:
+                # Fetch from server as usual
+                headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
+                self.log.emit(f"Fetching {self.parent_entity_name} GeoJSON…")
+                response = requests.get(
+                    f"{self.url}/api/v1/data/geo/minimal",
+                    headers=headers,
+                    params={'model': self.parent_entity_name},
+                    timeout=30
+                )
+                response.raise_for_status()
+                geojson = response.json()
 
             if not isinstance(geojson, dict) or "features" not in geojson or geojson.get('type') != 'FeatureCollection':
                 raise ValueError("Invalid GeoJSON format")
+
+            # Save GeoJSON to file (only if not using local file)
+            if not (hasattr(self, 'use_local_file') and self.use_local_file):
+                try:
+                    # Create Documents/ODK_Data directory if it doesn't exist
+                    documents_path = os.path.expanduser("~/Documents")
+                    odk_data_path = os.path.join(documents_path, "ODK_Data")
+                    os.makedirs(odk_data_path, exist_ok=True)
+                    
+                    # Generate filename with timestamp
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"parent({self.parent_entity_name}).geojson"
+                    filepath = os.path.join(odk_data_path, filename)
+                    
+                    # Save the GeoJSON data
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        json.dump(geojson, f, indent=2, ensure_ascii=False)
+                    
+                    self.log.emit(f"Saved {self.parent_entity_name} GeoJSON to: {filepath}")
+                    
+                    # Add the GeoJSON as a layer to the map
+                    layer_name = f"{self.parent_entity_name.capitalize()} Boundaries"
+                    layer = add_geojson_to_map(filepath, layer_name)
+                    if layer:
+                        self.log.emit(f"Added {layer_name} layer to QGIS map")
+                    else:
+                        self.log.emit(f"Warning: Could not add {layer_name} layer to map")
+                        
+                except Exception as save_error:
+                    self.log.emit(f"Warning: Could not save GeoJSON file: {str(save_error)}")
 
             settlements_gdf = gpd.GeoDataFrame.from_features(geojson["features"])
             # 1) Immediately force CRS to EPSG:4326 (WGS84) so intersection logic in 4326 works correctly
@@ -152,7 +272,6 @@ class Worker(QObject):
         except Exception as e:
             self.log.emit(f"Error fetching {self.parent_entity_name} GeoJSON: {str(e)}")
             raise
-
 
     def process_pcode_batch(self, start, batch_indices, batch_codes, batch_num, total_items, batch_size):
         """Process a batch of pcode-based queries."""
@@ -324,8 +443,13 @@ class Worker(QObject):
 
                 # ── 2A: Handle point‐based intersection via 1 km buffer ──
                 if not points_gdf.empty:
-                    # Buffer each point by ~1 km ≈ 1/111 degrees
-                    points_gdf["buffered_geom"] = points_gdf.geometry.buffer(1.0 / 111.0)
+                    # Validate and repair geometries before buffering
+                    points_gdf["geometry"] = points_gdf["geometry"].apply(validate_and_repair_geometry)
+                    points_gdf = points_gdf[points_gdf["geometry"].notnull()]
+                    
+                    if not points_gdf.empty:
+                        # Buffer each point by ~1 km ≈ 1/111 degrees
+                        points_gdf["buffered_geom"] = points_gdf.geometry.buffer(1.0 / 111.0)
 
                     # For all point buffers, do a fast spatial index lookup first, then intersect
                     for idx_row, row in points_gdf.iterrows():
@@ -385,8 +509,13 @@ class Worker(QObject):
 
                 # ── 2B: Handle polygon‐based intersection by "maximum overlap area" ──
                 if not polygons_gdf.empty:
-                    # Build a spatial index on settlements for faster bounding‐box lookups
-                    settlement_sindex = settlements_gdf.sindex
+                    # Validate and repair geometries before intersection
+                    polygons_gdf["geometry"] = polygons_gdf["geometry"].apply(validate_and_repair_geometry)
+                    polygons_gdf = polygons_gdf[polygons_gdf["geometry"].notnull()]
+                    
+                    if not polygons_gdf.empty:
+                        # Build a spatial index on settlements for faster bounding‐box lookups
+                        settlement_sindex = settlements_gdf.sindex
 
                     for idx_row, row in polygons_gdf.iterrows():
                         if not self._is_running:
@@ -451,9 +580,14 @@ class Worker(QObject):
 
                 # ── 2C: Handle line‐based intersection via plain intersects ──
                 if not lines_gdf.empty:
-                    self.log.emit(f"Processing {len(lines_gdf)} line features...")
-                    # Build a spatial index on settlements (just once)
-                    settlement_sindex = settlements_gdf.sindex
+                    # Validate and repair geometries before intersection
+                    lines_gdf["geometry"] = lines_gdf["geometry"].apply(validate_and_repair_geometry)
+                    lines_gdf = lines_gdf[lines_gdf["geometry"].notnull()]
+                    
+                    if not lines_gdf.empty:
+                        self.log.emit(f"Processing {len(lines_gdf)} line features...")
+                        # Build a spatial index on settlements (just once)
+                        settlement_sindex = settlements_gdf.sindex
 
                     for idx_row, row in lines_gdf.iterrows():
                         if not self._is_running:
@@ -573,18 +707,57 @@ class WorkerLocalGeoJSON(QObject):
     def fetch_settlements_geojson(self):
         """Fetch settlements GeoJSON from the server."""
         try:
-            headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
-            self.log.emit("Fetching settlements GeoJSON…")
-            response = requests.get(
-                f"{self.url}/api/v1/data/geo/minimal",
-                headers=headers,
-                params={'model': self.parent_entity_name},
-                timeout=30
-            )
-            response.raise_for_status()
-            geojson = response.json()
+            # Check if we should use a local file
+            if hasattr(self, 'use_local_file') and self.use_local_file and hasattr(self, 'local_filepath'):
+                self.log.emit(f"Using local file: {self.local_filepath}")
+                with open(self.local_filepath, 'r', encoding='utf-8') as f:
+                    geojson = json.load(f)
+            else:
+                # Fetch from server as usual
+                headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
+                self.log.emit("Fetching settlements GeoJSON…")
+                response = requests.get(
+                    f"{self.url}/api/v1/data/geo/minimal",
+                    headers=headers,
+                    params={'model': self.parent_entity_name},
+                    timeout=30
+                )
+                response.raise_for_status()
+                geojson = response.json()
+            
             if not isinstance(geojson, dict) or "features" not in geojson:
                 raise ValueError("Invalid GeoJSON format")
+            
+            # Save GeoJSON to file (only if not using local file)
+            if not (hasattr(self, 'use_local_file') and self.use_local_file):
+                try:
+                    # Create Documents/ODK_Data directory if it doesn't exist
+                    documents_path = os.path.expanduser("~/Documents")
+                    odk_data_path = os.path.join(documents_path, "ODK_Data")
+                    os.makedirs(odk_data_path, exist_ok=True)
+                    
+                    # Generate filename with timestamp
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"parent({self.parent_entity_name}).geojson"
+                    filepath = os.path.join(odk_data_path, filename)
+                    
+                    # Save the GeoJSON data
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        json.dump(geojson, f, indent=2, ensure_ascii=False)
+                    
+                    self.log.emit(f"Saved {self.parent_entity_name} GeoJSON to: {filepath}")
+                    
+                    # Add the GeoJSON as a layer to the map
+                    layer_name = f"{self.parent_entity_name.capitalize()} Boundaries"
+                    layer = add_geojson_to_map(filepath, layer_name)
+                    if layer:
+                        self.log.emit(f"Added {layer_name} layer to QGIS map")
+                    else:
+                        self.log.emit(f"Warning: Could not add {layer_name} layer to map")
+                        
+                except Exception as save_error:
+                    self.log.emit(f"Warning: Could not save GeoJSON file: {str(save_error)}")
+            
             settlements_gdf = gpd.GeoDataFrame.from_features(geojson["features"])
             # Force CRS to WGS84 (EPSG:4326)
             settlements_gdf.set_crs(epsg=4326, inplace=True)
@@ -738,10 +911,8 @@ class WorkerLocalGeoJSON(QObject):
                 unmatched_gdf['geometry'] = unmatched_gdf['geojson'].apply(lambda x: shape(x) if x else None)
                 unmatched_gdf = unmatched_gdf[unmatched_gdf['geometry'].notnull()]
                 
-                # Ensure geometries are valid before buffering
-                unmatched_gdf['geometry'] = unmatched_gdf['geometry'].apply(
-                    lambda geom: geom if geom and geom.is_valid else None
-                )
+                # Validate and repair geometries before buffering
+                unmatched_gdf['geometry'] = unmatched_gdf['geometry'].apply(validate_and_repair_geometry)
                 unmatched_gdf = unmatched_gdf[unmatched_gdf['geometry'].notnull()]
                 
                 if not unmatched_gdf.empty:
@@ -1154,6 +1325,42 @@ class KesMISDialog(QDialog):
         if not self.layer_combo.currentData() or not self.parent_combo.currentText():
             return
 
+        parent_entity = self.parent_combo.currentText()
+        layer_name = f"{parent_entity.capitalize()} Boundaries"
+        use_local_file = False
+        local_filepath = None
+        
+        # 1. Check if layer is already loaded
+        for lyr in QgsProject.instance().mapLayers().values():
+            if lyr.name() == layer_name:
+                QMessageBox.information(self, "Layer Already Loaded", f"A layer named '{layer_name}' is already loaded in QGIS.")
+                return
+
+        # 2. Check if file exists in ODK_Data
+        documents_path = os.path.expanduser("~/Documents")
+        odk_data_path = os.path.join(documents_path, "ODK_Data")
+        filename = f"parent({parent_entity}).geojson"
+        filepath = os.path.join(odk_data_path, filename)
+        if os.path.exists(filepath):
+            reply = QMessageBox.question(
+                self,
+                "Parent GeoJSON Exists",
+                f"A local file for this parent already exists:\n{filepath}\n\nDo you want to use the existing file (skip download) or fetch a fresh copy?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                # Use the local file for intersection
+                use_local_file = True
+                local_filepath = filepath
+                # Load the file as a layer
+                lyr = add_geojson_to_map(filepath, layer_name)
+                if lyr:
+                    self.log_message(f"Loaded existing {layer_name} from file: {filepath}")
+                else:
+                    self.log_message(f"Failed to load existing {layer_name} from file: {filepath}")
+            # else: continue to fetch fresh
+
         self.pcode_entity_data = {}
         self.valid_feature_indices = []
         self.log_message(f"Starting pcode data fetch for parent entity '{self.parent_combo.currentText()}'")
@@ -1181,6 +1388,14 @@ class KesMISDialog(QDialog):
                 self.url_input.text(),
                 self.token
             )
+
+        # Set the local file flag and path if using local file
+        if use_local_file:
+            self.worker.use_local_file = True
+            self.worker.local_filepath = local_filepath
+        else:
+            self.worker.use_local_file = False
+            self.worker.local_filepath = None
 
         self.worker.gdf = self.gdf
         self.worker.moveToThread(self.thread)
@@ -1216,7 +1431,6 @@ class KesMISDialog(QDialog):
         try:
             if hasattr(self, '_login_in_progress') and self._login_in_progress:
                 self.log_message("Login already in progress. Please wait.")
-                QMessageBox.warning(self, "Login In Progress", "A login attempt is already in progress. Please wait.")
                 return
 
             self._login_in_progress = True
@@ -1287,7 +1501,7 @@ class KesMISDialog(QDialog):
                 self.layer_combo.setEnabled(True)
                 self.parent_combo.setEnabled(True)
                 self.entity_combo.setEnabled(True)
-                QMessageBox.information(self, "Success", "Logged in successfully!")
+                self.log_message("Login successful!")
             else:
                 self.is_logged_in = False
                 self.log_message(f"Login failed: {response.text}")
@@ -1320,8 +1534,7 @@ class KesMISDialog(QDialog):
         self.settings.setValue("username", username)
         self.settings.setValue("password", password)
 
-        QMessageBox.information(self, "Success", "Credentials saved successfully!")
-        self.log_message(f"Saved credentials: URL={url}, Username={username}")
+        self.log_message(f"Credentials saved successfully: URL={url}, Username={username}")
 
     def populate_layers(self):
         """Populate available layers from QGIS canvas and check for 'code' column."""

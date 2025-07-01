@@ -6,9 +6,8 @@ from qgis.core import QgsVectorLayer, QgsProject, QgsCoordinateReferenceSystem
 import requests
 
 from PyQt5.QtWidgets import (QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox, 
-                             QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox, 
-                             QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, 
-                             QTableWidgetItem, QSizePolicy)
+                             QLineEdit, QFileDialog, QComboBox, QHBoxLayout, QMessageBox, 
+                             QTextEdit)
 import json 
 from PyQt5.QtCore import Qt  # Add this import for Qt
 from qgis.core import QgsVectorLayer, QgsProject
@@ -22,13 +21,10 @@ import csv
 import json
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 from PyQt5.QtCore import QSettings  
-from PyQt5.QtGui import QIcon
 
  
 from qgis.core import QgsMessageLog
 from collections import OrderedDict
-from PyQt5.QtCore import QRegularExpression
-from PyQt5.QtGui import QRegularExpressionValidator
 
 from PyQt5.QtWidgets import QLabel
 from PyQt5.QtGui import QPixmap
@@ -38,7 +34,7 @@ from PyQt5.QtWidgets import QDialog, QComboBox, QLineEdit, QPushButton, QVBoxLay
 from qgis.core import QgsVectorLayer, QgsProject, QgsCoordinateReferenceSystem
 from qgis.gui import QgsMapCanvas
 from PyQt5.QtCore import Qt, QTimer, QSettings
-from PyQt5.QtGui import QPixmap, QIcon
+from PyQt5.QtGui import QPixmap
 import requests
 import json
 import csv
@@ -50,10 +46,7 @@ from PyQt5.QtCore import QThread, pyqtSignal, QObject
 
 import tempfile
 import os
-import subprocess
-import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 # Optional imports for advanced functionality
 try:
@@ -196,6 +189,7 @@ class ConnectODKDialog(QDialog):
         self.projects = []
         self.forms = []
         self.geo_data = []
+        self.parent_entity_name = None
 
         # Create layout
         layout = QVBoxLayout()
@@ -237,18 +231,12 @@ class ConnectODKDialog(QDialog):
         self.map_canvas = QgsMapCanvas()
         self.map_canvas.setCanvasColor(Qt.white)
 
-        # Add checkbox for permanent file saving
-        self.save_permanent_check = QCheckBox("Save files permanently (not temporary)")
-        self.save_permanent_check.setToolTip("If checked, files will be saved to a permanent location instead of temporary files")
-        self.save_permanent_check.setChecked(self.settings.value("save_permanent", True, type=bool))
-
         # Add widgets to form layout
         form_layout.addRow("ODK Central URL:", self.url_edit)
         form_layout.addRow("Username:", self.username_edit)
         form_layout.addRow("Password:", self.password_edit)
         form_layout.addRow("Project:", self.project_combobox)
         form_layout.addRow("Form:", self.form_combobox)
-        form_layout.addRow("", self.save_permanent_check)
 
         # Create button layout
         button_layout = QHBoxLayout()
@@ -273,11 +261,6 @@ class ConnectODKDialog(QDialog):
         # Add clear log button
         self.clear_log_button = QPushButton("Clear Log")
         self.clear_log_button.clicked.connect(self.clear_log)
-
-        # Add cleanup button for temporary files
-        self.cleanup_button = QPushButton("Clean Up Temporary Files")
-        self.cleanup_button.clicked.connect(self.manual_cleanup_temp_files)
-        self.cleanup_button.setToolTip("Manually clean up any temporary files created by this session")
 
         # Add logo and credits
         logo_label = QLabel()
@@ -309,7 +292,6 @@ class ConnectODKDialog(QDialog):
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.log_textedit)
         layout.addWidget(self.clear_log_button)
-        layout.addWidget(self.cleanup_button)
         layout.addWidget(credit_label)
         layout.addWidget(disclaimer_label)
 
@@ -381,6 +363,12 @@ class ConnectODKDialog(QDialog):
                 QMessageBox.warning(self, "No Submissions", "No submissions found for the selected form.")
                 return
 
+            # Store parent entity name for layer naming
+            if hasattr(self, 'parent_combo') and self.parent_combo.currentText():
+                self.parent_entity_name = self.parent_combo.currentText()
+            else:
+                self.parent_entity_name = "data"
+
             with open('submissions.json', 'w') as f:
                 json.dump(submissions, f, indent=2)
                 self.log_message(f"[{datetime.now().strftime('%H:%M:%S.%f')}] Submissions saved to submissions.json")
@@ -405,17 +393,7 @@ class ConnectODKDialog(QDialog):
         self.submission_worker = None
 
     def closeEvent(self, event):
-        """Handle dialog close event to clean up threads and temporary files."""
-        # Clean up temporary files
-        if hasattr(self, 'temp_files'):
-            for temp_file in self.temp_files:
-                try:
-                    if os.path.exists(temp_file):
-                        os.unlink(temp_file)
-                        self.log_message(f"Cleaned up temporary file: {temp_file}")
-                except Exception as e:
-                    self.log_message(f"Error cleaning up temporary file {temp_file}: {str(e)}")
-        
+        """Handle dialog close event to clean up threads."""
         # Clean up threads
         if self.submission_thread.isRunning():
             if self.submission_worker:
@@ -700,28 +678,22 @@ class ConnectODKDialog(QDialog):
  
 
  
-    def cleanup_temp_files(self):
-        """Clean up any existing temporary files."""
-        if hasattr(self, 'temp_files'):
-            for temp_file in self.temp_files:
-                try:
-                    if os.path.exists(temp_file):
-                        os.unlink(temp_file)
-                        self.log_message(f"Cleaned up old temporary file: {temp_file}")
-                except Exception as e:
-                    self.log_message(f"Error cleaning up old temporary file {temp_file}: {str(e)}")
-            self.temp_files = []
-
     def add_geojson_to_map(self, geojson_data, form_name):
         """Add GeoJSON data as separate layers to the map based on geometry type.
-        Saves data to temporary files first to prevent QGIS hanging with virtual layers."""
-        
-        # Clean up any existing temporary files first
-        self.cleanup_temp_files()
+        Saves data to Documents folder and loads as layers with appropriate names."""
         
         # Remove empty properties
         geojson_data = self.remove_empty_properties(geojson_data)
         self.geo_data = geojson_data
+
+        # Get Documents folder path
+        documents_path = Path.home() / "Documents"
+        if not documents_path.exists():
+            documents_path = Path.home() / "My Documents"
+        
+        # Create ODK folder in Documents if it doesn't exist
+        odk_folder = documents_path / "ODK_Data"
+        odk_folder.mkdir(exist_ok=True)
 
         # Split features by geometry type
         geometry_types = {
@@ -760,50 +732,32 @@ class ConnectODKDialog(QDialog):
                 "features": features
             }
             
-            # Save to temporary file instead of creating virtual layer
+            # Save to Documents folder
             try:
-                # Determine file path based on user preference
-                if self.save_permanent_check.isChecked():
-                    # Ask user for save location
-                    file_path, _ = QFileDialog.getSaveFileName(
-                        self, 
-                        f"Save {geom_type} Layer", 
-                        f"{form_name}_{geom_type}.geojson", 
-                        "GeoJSON Files (*.geojson);;All Files (*)"
-                    )
-                    if not file_path:
-                        self.log_message(f"Skipping {geom_type} layer - no file path selected")
-                        continue
-                    if not file_path.endswith('.geojson'):
-                        file_path += '.geojson'
-                    
-                    # Write GeoJSON data to permanent file
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        json.dump(geom_geojson_data, f, indent=2)
-                    
-                    self.log_message(f"Saved {geom_type} layer to permanent file: {file_path}")
-                else:
-                    # Create temporary file
-                    temp_file = tempfile.NamedTemporaryFile(
-                        mode='w', 
-                        suffix='.geojson', 
-                        delete=False,
-                        encoding='utf-8'
-                    )
-                    file_path = temp_file.name
-                    
-                    # Write GeoJSON data to temporary file
-                    json.dump(geom_geojson_data, temp_file, indent=2)
-                    temp_file.close()
-                    
-                    # Store the temporary file path for cleanup later
-                    if not hasattr(self, 'temp_files'):
-                        self.temp_files = []
-                    self.temp_files.append(file_path)
+                # Create filename with timestamp and parent entity info
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                # Get parent entity name if available
+                parent_entity = "data"
+                if hasattr(self, 'parent_combo') and self.parent_combo.currentText():
+                    parent_entity = self.parent_combo.currentText()
+                elif hasattr(self, 'parent_entity_name') and self.parent_entity_name:
+                    parent_entity = self.parent_entity_name
+                
+                # Create descriptive filename
+                filename = f"{form_name}_{parent_entity}_{geom_type}_{timestamp}.geojson"
+                file_path = odk_folder / filename
+                
+                # Write GeoJSON data to file
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(geom_geojson_data, f, indent=2)
+                
+                self.log_message(f"Saved {geom_type} layer to: {file_path}")
                 
                 # Create layer from file
-                layer_name = f"{form_name}_{geom_type}"
-                vector_layer = QgsVectorLayer(file_path, layer_name, "ogr")
+                layer_name = f"{form_name}_{parent_entity}_{geom_type}"
+                vector_layer = QgsVectorLayer(str(file_path), layer_name, "ogr")
                 
                 if vector_layer.isValid():
                     # Set CRS explicitly
@@ -812,37 +766,20 @@ class ConnectODKDialog(QDialog):
                     # Add the vector layer to the current map project
                     QgsProject.instance().addMapLayer(vector_layer)
                     
-                    self.log_message(f"Successfully loaded {len(features)} {geom_type} features from file")
+                    self.log_message(f"Successfully loaded {len(features)} {geom_type} features as layer: {layer_name}")
                 else:
-                    self.log_message(f"Failed to load {geom_type} layer from file")
-                    # Clean up the file if layer creation failed (only for temp files)
-                    if not self.save_permanent_check.isChecked():
-                        try:
-                            os.unlink(file_path)
-                        except:
-                            pass
+                    self.log_message(f"Failed to load {geom_type} layer from file: {file_path}")
                         
             except Exception as e:
                 self.log_message(f"Error creating {geom_type} layer: {str(e)}")
-                # Clean up the file if there was an error (only for temp files)
-                if not self.save_permanent_check.isChecked() and 'file_path' in locals():
-                    try:
-                        os.unlink(file_path)
-                    except:
-                        pass
         
         # Optionally zoom to the extent of all added layers
         self.map_canvas.zoomToFullExtent()
         self.map_canvas.refresh()
         self.hide_progress()
 
-        if self.save_permanent_check.isChecked():
-            self.log_message("GeoJSON data has been added to the map with separate layers for each geometry type.")
-            self.log_message("Layers are loaded from permanent files to prevent QGIS hanging.")
-        else:
-            self.log_message("GeoJSON data has been added to the map with separate layers for each geometry type.")
-            self.log_message("Layers are loaded from temporary files to prevent QGIS hanging.")
-            self.log_message("Temporary files will be cleaned up when the dialog is closed.")
+        self.log_message("GeoJSON data has been saved to Documents/ODK_Data folder and loaded as layers.")
+        self.log_message(f"Files saved to: {odk_folder}")
 
     def extract_headers_from_geojson(self,features):
         """
@@ -935,27 +872,19 @@ class ConnectODKDialog(QDialog):
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
 
     def save_credentials(self):
-        """Save the entered credentials and preferences."""
+        """Save the entered credentials."""
         # Get the entered values from the text fields
         url = self.url_edit.text()
         username = self.username_edit.text()
         password = self.password_edit.text()
-        save_permanent = self.save_permanent_check.isChecked()
 
         # Save them to QSettings
         self.settings.setValue("url", url)
         self.settings.setValue("username", username)
         self.settings.setValue("password", password)
-        self.settings.setValue("save_permanent", save_permanent)
 
         # Show a confirmation message
-        QMessageBox.information(self, "Success", "Credentials and preferences saved successfully!")
+        QMessageBox.information(self, "Success", "Credentials saved successfully!")
 
         # Optionally, print or log the saved values for debugging (do not do this for passwords in production)
-        print(f"Saved URL: {url}, Username: {username}, Save Permanent: {save_permanent}")
-
-    def manual_cleanup_temp_files(self):
-        """Manually clean up temporary files."""
-        self.cleanup_temp_files()
-        self.log_message("Temporary files have been cleaned up.")
-        QMessageBox.information(self, "Cleanup Complete", "Temporary files have been cleaned up successfully.")
+        print(f"Saved URL: {url}, Username: {username}")
