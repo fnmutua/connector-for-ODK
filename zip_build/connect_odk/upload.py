@@ -1330,11 +1330,13 @@ class KesMISDialog(QDialog):
         use_local_file = False
         local_filepath = None
         
-        # 1. Check if layer is already loaded
+        # 1. Check if layer is already loaded (inform user but continue)
+        layer_already_loaded = False
         for lyr in QgsProject.instance().mapLayers().values():
             if lyr.name() == layer_name:
-                QMessageBox.information(self, "Layer Already Loaded", f"A layer named '{layer_name}' is already loaded in QGIS.")
-                return
+                layer_already_loaded = True
+                self.log_message(f"Layer '{layer_name}' is already loaded in QGIS.")
+                break
 
         # 2. Check if file exists in ODK_Data
         documents_path = os.path.expanduser("~/Documents")
@@ -1342,24 +1344,30 @@ class KesMISDialog(QDialog):
         filename = f"parent({parent_entity}).geojson"
         filepath = os.path.join(odk_data_path, filename)
         if os.path.exists(filepath):
-            reply = QMessageBox.question(
-                self,
-                "Parent GeoJSON Exists",
-                f"A local file for this parent already exists:\n{filepath}\n\nDo you want to use the existing file (skip download) or fetch a fresh copy?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
-            )
-            if reply == QMessageBox.Yes:
-                # Use the local file for intersection
+            if layer_already_loaded:
+                # Layer is already loaded, use the existing file for intersection
                 use_local_file = True
                 local_filepath = filepath
-                # Load the file as a layer
-                lyr = add_geojson_to_map(filepath, layer_name)
-                if lyr:
-                    self.log_message(f"Loaded existing {layer_name} from file: {filepath}")
-                else:
-                    self.log_message(f"Failed to load existing {layer_name} from file: {filepath}")
-            # else: continue to fetch fresh
+                self.log_message(f"Using existing {layer_name} layer and local file for intersection")
+            else:
+                reply = QMessageBox.question(
+                    self,
+                    "Parent GeoJSON Exists",
+                    f"A local file for this parent already exists:\n{filepath}\n\nDo you want to use the existing file (skip download) or fetch a fresh copy?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply == QMessageBox.Yes:
+                    # Use the local file for intersection
+                    use_local_file = True
+                    local_filepath = filepath
+                    # Load the file as a layer
+                    lyr = add_geojson_to_map(filepath, layer_name)
+                    if lyr:
+                        self.log_message(f"Loaded existing {layer_name} from file: {filepath}")
+                    else:
+                        self.log_message(f"Failed to load existing {layer_name} from file: {filepath}")
+                # else: continue to fetch fresh
 
         self.pcode_entity_data = {}
         self.valid_feature_indices = []
