@@ -469,10 +469,14 @@ class Worker(QObject):
                         best_intersect_id = None
                         for cand in candidate_idx:
                             settlement_geom = settlements_gdf.geometry.iloc[cand]
-                            if buf.intersects(settlement_geom):
-                                # We only need any intersect for points; take the first one
-                                best_intersect_id = cand
-                                break
+                            try:
+                                if buf.intersects(settlement_geom):
+                                    # We only need any intersect for points; take the first one
+                                    best_intersect_id = cand
+                                    break
+                            except Exception as e:
+                                self.log.emit(f"Skipping invalid geometry intersection for point {original_idx}: {str(e)}")
+                                continue
 
                         if best_intersect_id is not None:
                             settlement = settlements_gdf.iloc[best_intersect_id]
@@ -534,14 +538,18 @@ class Worker(QObject):
                         best_area = 0.0
                         for cand in candidate_idx:
                             settlement_geom = settlements_gdf.geometry.iloc[cand]
-                            if not settlement_geom.intersects(poly_geom):
+                            try:
+                                if not settlement_geom.intersects(poly_geom):
+                                    continue
+                                intersect_geom = settlement_geom.intersection(poly_geom)
+                                if not intersect_geom.is_empty:
+                                    area = intersect_geom.area
+                                    if area > best_area:
+                                        best_area = area
+                                        best_idx = cand
+                            except Exception as e:
+                                self.log.emit(f"Skipping invalid geometry intersection for index {original_idx}: {str(e)}")
                                 continue
-                            intersect_geom = settlement_geom.intersection(poly_geom)
-                            if not intersect_geom.is_empty:
-                                area = intersect_geom.area
-                                if area > best_area:
-                                    best_area = area
-                                    best_idx = cand
 
                         # 2B.3: If best_idx is not None, assign the parent from that settlement
                         if best_idx is not None:
@@ -617,7 +625,7 @@ class Worker(QObject):
                                     self.log.emit(f"Found intersection for line at index {original_idx} with settlement {cand}")
                                     break
                             except Exception as e:
-                                self.log.emit(f"Error during intersection check for line {original_idx}: {str(e)}")
+                                self.log.emit(f"Skipping invalid geometry intersection for line {original_idx}: {str(e)}")
                                 continue
 
                         if matched_settlement is not None:
@@ -922,8 +930,12 @@ class WorkerLocalGeoJSON(QObject):
 
                     self.log.emit(f"Processing {len(unmatched_gdf)} buffered geometries for intersection...")
                     
-                    # Perform spatial join
-                    intersections = gpd.sjoin(unmatched_gdf, settlements_gdf, how="left", predicate="intersects")
+                    # Perform spatial join with error handling
+                    try:
+                        intersections = gpd.sjoin(unmatched_gdf, settlements_gdf, how="left", predicate="intersects")
+                    except Exception as e:
+                        self.log.emit(f"Error during spatial join, skipping batch: {str(e)}")
+                        return
                     
                     for idx, row in intersections.iterrows():
                         if not pd.isna(row['index_right']):
@@ -1571,6 +1583,8 @@ class KesMISDialog(QDialog):
             if response.status_code == 200:
                 data = response.json()
                 self.api_entities = data.get("models", [])
+                # Sort entities by model name
+                self.api_entities.sort(key=lambda e: e.get("model", "").lower())
                 self.entity_combo.clear()
                 entity_names = [entity["model"] for entity in self.api_entities]
                 self.entity_combo.addItems(entity_names)
@@ -1632,6 +1646,7 @@ class KesMISDialog(QDialog):
         self.field_mapping = field_mapping
         self._full_table_data = table_data
         api_fields = [attr["name"] for attr in self.entity_combo.currentData().get("attributes", [])]
+        api_fields.sort(key=lambda x: x.lower())
 
         self.mapping_table.blockSignals(True)
         self.mapping_table.setRowCount(0)
@@ -1641,7 +1656,7 @@ class KesMISDialog(QDialog):
             self.mapping_table.setItem(row, 0, QTableWidgetItem(field))
 
             combo = SearchableComboBox()
-            combo.addItems(api_fields)  # Add full API field list
+            combo.addItems(api_fields)  # Add sorted API field list
             combo.setCurrentText(matched_api_field if matched_api_field else "-")
             combo.currentTextChanged.connect(lambda text, f=field: self.update_mapping(f, text))
             self.mapping_table.setCellWidget(row, 1, combo)
@@ -1750,6 +1765,8 @@ class KesMISDialog(QDialog):
                 # geometry
                 if hasattr(row, "geometry") and row.geometry:
                     feature["geom"] = row.geometry.__geo_interface__
+                # Add isApproved property
+                feature["isApproved"] = True
                 features.append(feature)
 
             if not features:
