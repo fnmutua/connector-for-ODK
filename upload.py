@@ -9,7 +9,8 @@ from PyQt5.QtWidgets import (
     QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QApplication,
     QTableWidgetItem, QSizePolicy
 )
-from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
+from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer, QUrl
+from PyQt5.QtGui import QDesktopServices
 from fuzzywuzzy import fuzz
 import json
 import geopandas as gpd
@@ -1083,6 +1084,26 @@ class KesMISDialog(QDialog):
         self.pcode_fields = ["settlement_id", "ward_id", "subcounty_id", "county_id"]
         self.is_logged_in = False
         self.settings = QSettings("YourOrganization", "KesMIS")
+        # Optional URL where users can download the external code generator script
+        self.generate_code_url = self.settings.value("generate_code_url", "")
+        if not self.generate_code_url:
+            try:
+                plugin_root = os.path.dirname(__file__)
+                gen_path = os.path.join(plugin_root, "generate_code.py")
+                if os.path.exists(gen_path):
+                    # Use file URL to the script in plugin root
+                    self.generate_code_url = f"file:///{gen_path.replace('\\', '/')}"
+            except Exception:
+                pass
+        # Optional URL to open local QGIS console helper script
+        self.code_helper_url = ""
+        try:
+            plugin_root = os.path.dirname(__file__)
+            helper_path = os.path.join(plugin_root, "code_helper_qgis_console.py")
+            if os.path.exists(helper_path):
+                self.code_helper_url = f"file:///{helper_path.replace('\\', '/')}"
+        except Exception:
+            pass
         self.valid_feature_indices = []
         self.gdf = None
         self._full_table_data = []
@@ -1151,10 +1172,18 @@ class KesMISDialog(QDialog):
         intersection_layout.addWidget(QLabel("Intersection Method:"))
         intersection_layout.addWidget(self.local_intersection_check)
         intersection_layout.addStretch()
+        # Helper to open the QGIS console script for adding 'code'
+        helper_layout = QHBoxLayout()
+        self.open_code_helper_button = QPushButton("Open 'code' helper script")
+        self.open_code_helper_button.setEnabled(bool(self.code_helper_url))
+        self.open_code_helper_button.clicked.connect(self.open_code_helper)
+        helper_layout.addWidget(self.open_code_helper_button)
+        helper_layout.addStretch()
         layer_layout.addLayout(layer_selection_layout)
         layer_layout.addLayout(parent_selection_layout)
         layer_layout.addLayout(entity_selection_layout)
         layer_layout.addLayout(intersection_layout)
+        layer_layout.addLayout(helper_layout)
         layer_box.setLayout(layer_layout)
         layer_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         top_layout.addWidget(layer_box, 1)
@@ -1222,6 +1251,13 @@ class KesMISDialog(QDialog):
         self.worker = None
         self.field_matching_worker = None
 
+    def open_code_helper(self):
+        """Open the QGIS console helper script file URL."""
+        if not self.code_helper_url:
+            QMessageBox.warning(self, "Helper Not Found", "The console helper script was not found in the plugin folder.")
+            return
+        QDesktopServices.openUrl(QUrl(self.code_helper_url))
+
     def clear_search(self):
         """Clear the search input and show all table rows."""
         self.search_input.clear()
@@ -1275,6 +1311,41 @@ class KesMISDialog(QDialog):
                 srid = layer.crs().postgisSrid()
                 self.log_message(f"Layer CRS SRID detected: {srid}")
 
+                # Warn if selected layer lacks 'code' column
+                layer_fields = [f.name() for f in layer.fields()]
+                if "code" not in layer_fields:
+                    if self.generate_code_url:
+                        self.log_message(
+                            "Selected layer does not have a 'code' column. "
+                            "Please download and run the external generator script to add it."
+                        )
+                        msg = QMessageBox(self)
+                        msg.setIcon(QMessageBox.Warning)
+                        msg.setWindowTitle("Missing 'code' column")
+                        msg.setText(
+                            (
+                                "The selected layer does not have a 'code' column.\n\n"
+                                "Please download and run the external script 'generate_code.py' to add a 'code' column, then reload the layer.\n\n"
+                                f"Download: <a href=\"{self.generate_code_url}\">generate_code.py</a>"
+                            )
+                        )
+                        msg.setTextFormat(Qt.RichText)
+                        msg.setStandardButtons(QMessageBox.Ok)
+                        msg.exec_()
+                    else:
+                        self.log_message(
+                            "Selected layer does not have a 'code' column. "
+                            "Obtain and run 'generate_code.py' externally to add it, then reload the layer."
+                        )
+                        QMessageBox.warning(
+                            self,
+                            "Missing 'code' column",
+                            (
+                                "The selected layer does not have a 'code' column.\n\n"
+                                "Please obtain and run 'generate_code.py' externally to add a 'code' column, then reload the layer."
+                            ),
+                        )
+
                 # 2) Build a list of GeoJSON‐like feature dicts
                 features = [
                     {
@@ -1306,10 +1377,8 @@ class KesMISDialog(QDialog):
                     QMessageBox.critical(self, "Projection Error", f"Failed to reproject layer: {str(e)}")
                     return
 
-                # 5) Ensure there is always a "code" column (generate if absent)
-                if "code" not in self.gdf.columns:
-                    self.gdf["code"] = [shortuuid.ShortUUID().random(length=6) for _ in range(len(self.gdf))]
-                    self.log_message("Generated unique codes for all features.")
+                # 5) Do NOT auto-generate 'code' values; require user to add column externally
+                # If 'code' column is absent, proceed without it (it's optional for upload)
 
                 # 6) Set geojson column from the already reprojected geometry
                 self.gdf["geojson"] = self.gdf.geometry.apply(
@@ -1565,10 +1634,16 @@ class KesMISDialog(QDialog):
                 self.layer_combo.addItem(layer.name(), layer)
                 layer_fields = [f.name() for f in layer.fields()]
                 if "code" not in layer_fields:
-                    self.log_message(
-                        f"Layer '{layer.name()}' does not have a 'code' column. "
-                        "Unique codes will be generated using shortid."
-                    )
+                    if self.generate_code_url:
+                        self.log_message(
+                            f"Layer '{layer.name()}' does not have a 'code' column. "
+                            "Download 'generate_code.py' and run it to add the column."
+                        )
+                    else:
+                        self.log_message(
+                            f"Layer '{layer.name()}' does not have a 'code' column. "
+                            "Obtain and run 'generate_code.py' externally to add it."
+                        )
         self.layer_combo.setEnabled(True)
 
     def fetch_entities(self, base_url):
