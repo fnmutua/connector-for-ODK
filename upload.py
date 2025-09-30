@@ -9,8 +9,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QApplication,
     QTableWidgetItem, QSizePolicy
 )
-from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer, QUrl
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
 from fuzzywuzzy import fuzz
 import json
 import geopandas as gpd
@@ -1172,18 +1171,10 @@ class KesMISDialog(QDialog):
         intersection_layout.addWidget(QLabel("Intersection Method:"))
         intersection_layout.addWidget(self.local_intersection_check)
         intersection_layout.addStretch()
-        # Helper to open the QGIS console script for adding 'code'
-        helper_layout = QHBoxLayout()
-        self.open_code_helper_button = QPushButton("Open 'code' helper script")
-        self.open_code_helper_button.setEnabled(bool(self.code_helper_url))
-        self.open_code_helper_button.clicked.connect(self.open_code_helper)
-        helper_layout.addWidget(self.open_code_helper_button)
-        helper_layout.addStretch()
         layer_layout.addLayout(layer_selection_layout)
         layer_layout.addLayout(parent_selection_layout)
         layer_layout.addLayout(entity_selection_layout)
         layer_layout.addLayout(intersection_layout)
-        layer_layout.addLayout(helper_layout)
         layer_box.setLayout(layer_layout)
         layer_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         top_layout.addWidget(layer_box, 1)
@@ -1251,13 +1242,6 @@ class KesMISDialog(QDialog):
         self.worker = None
         self.field_matching_worker = None
 
-    def open_code_helper(self):
-        """Open the QGIS console helper script file URL."""
-        if not self.code_helper_url:
-            QMessageBox.warning(self, "Helper Not Found", "The console helper script was not found in the plugin folder.")
-            return
-        QDesktopServices.openUrl(QUrl(self.code_helper_url))
-
     def clear_search(self):
         """Clear the search input and show all table rows."""
         self.search_input.clear()
@@ -1314,37 +1298,36 @@ class KesMISDialog(QDialog):
                 # Warn if selected layer lacks 'code' column
                 layer_fields = [f.name() for f in layer.fields()]
                 if "code" not in layer_fields:
-                    if self.generate_code_url:
-                        self.log_message(
-                            "Selected layer does not have a 'code' column. "
-                            "Please download and run the external generator script to add it."
-                        )
-                        msg = QMessageBox(self)
-                        msg.setIcon(QMessageBox.Warning)
-                        msg.setWindowTitle("Missing 'code' column")
-                        msg.setText(
-                            (
-                                "The selected layer does not have a 'code' column.\n\n"
-                                "Please download and run the external script 'generate_code.py' to add a 'code' column, then reload the layer.\n\n"
-                                f"Download: <a href=\"{self.generate_code_url}\">generate_code.py</a>"
-                            )
-                        )
-                        msg.setTextFormat(Qt.RichText)
-                        msg.setStandardButtons(QMessageBox.Ok)
-                        msg.exec_()
-                    else:
-                        self.log_message(
-                            "Selected layer does not have a 'code' column. "
-                            "Obtain and run 'generate_code.py' externally to add it, then reload the layer."
-                        )
-                        QMessageBox.warning(
-                            self,
-                            "Missing 'code' column",
-                            (
-                                "The selected layer does not have a 'code' column.\n\n"
-                                "Please obtain and run 'generate_code.py' externally to add a 'code' column, then reload the layer."
-                            ),
-                        )
+                    # Build a unified warning offering both options if available
+                    gen_link_html = f"Download: <a href=\"{self.generate_code_url}\">generate_code.py</a>" if self.generate_code_url else None
+                    helper_link_html = f"Alternative (QGIS Console): <a href=\"{self.code_helper_url}\">code_helper_qgis_console.py</a>" if getattr(self, "code_helper_url", "") else None
+
+                    parts = [
+                        "The selected layer does not have a 'code' column.",
+                        "\n\n",
+                        "Option 1: Run the external generator script, then reload the layer.",
+                    ]
+                    if gen_link_html:
+                        parts.extend(["\n", gen_link_html])
+                    parts.extend([
+                        "\n\n",
+                        "Option 2: Use the QGIS Python Console helper to add/populate 'code' across loaded layers, then reload.",
+                    ])
+                    if helper_link_html:
+                        parts.extend(["\n", helper_link_html])
+
+                    message_text = "".join(parts)
+
+                    # Log concise hint
+                    self.log_message("Selected layer missing 'code'. See dialog for generator and QGIS helper options.")
+
+                    msg = QMessageBox(self)
+                    msg.setIcon(QMessageBox.Warning)
+                    msg.setWindowTitle("Missing 'code' column")
+                    msg.setText(message_text)
+                    msg.setTextFormat(Qt.RichText)
+                    msg.setStandardButtons(QMessageBox.Ok)
+                    msg.exec_()
 
                 # 2) Build a list of GeoJSON‐like feature dicts
                 features = [
@@ -1634,16 +1617,12 @@ class KesMISDialog(QDialog):
                 self.layer_combo.addItem(layer.name(), layer)
                 layer_fields = [f.name() for f in layer.fields()]
                 if "code" not in layer_fields:
+                    hint = [f"Layer '{layer.name()}' missing 'code'."]
                     if self.generate_code_url:
-                        self.log_message(
-                            f"Layer '{layer.name()}' does not have a 'code' column. "
-                            "Download 'generate_code.py' and run it to add the column."
-                        )
-                    else:
-                        self.log_message(
-                            f"Layer '{layer.name()}' does not have a 'code' column. "
-                            "Obtain and run 'generate_code.py' externally to add it."
-                        )
+                        hint.append(" Use generator: generate_code.py.")
+                    if getattr(self, "code_helper_url", ""):
+                        hint.append(" Or open QGIS helper: code_helper_qgis_console.py.")
+                    self.log_message("".join(hint))
         self.layer_combo.setEnabled(True)
 
     def fetch_entities(self, base_url):
