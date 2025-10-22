@@ -9,7 +9,8 @@ from PyQt5.QtWidgets import (
     QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QApplication,
     QTableWidgetItem, QSizePolicy
 )
-from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
+from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer, QUrl
+from PyQt5.QtGui import QDesktopServices
 from fuzzywuzzy import fuzz
 import json
 import geopandas as gpd
@@ -1091,7 +1092,7 @@ class KesMISDialog(QDialog):
                 gen_path = os.path.join(plugin_root, "generate_code.py")
                 if os.path.exists(gen_path):
                     # Use file URL to the script in plugin root
-                    self.generate_code_url = f"file:///{gen_path.replace('\\', '/')}"
+                    self.generate_code_url = f"file:///{gen_path.replace(chr(92), '/')}"
             except Exception:
                 pass
         # Optional URL to open local QGIS console helper script
@@ -1100,7 +1101,7 @@ class KesMISDialog(QDialog):
             plugin_root = os.path.dirname(__file__)
             helper_path = os.path.join(plugin_root, "code_helper_qgis_console.py")
             if os.path.exists(helper_path):
-                self.code_helper_url = f"file:///{helper_path.replace('\\', '/')}"
+                self.code_helper_url = f"file:///{helper_path.replace(chr(92), '/')}"
         except Exception:
             pass
         self.valid_feature_indices = []
@@ -1171,10 +1172,18 @@ class KesMISDialog(QDialog):
         intersection_layout.addWidget(QLabel("Intersection Method:"))
         intersection_layout.addWidget(self.local_intersection_check)
         intersection_layout.addStretch()
+        # Helper to open the QGIS console script for adding 'code'
+        helper_layout = QHBoxLayout()
+        self.open_code_helper_button = QPushButton("Open 'code' helper script")
+        self.open_code_helper_button.setEnabled(bool(self.code_helper_url))
+        self.open_code_helper_button.clicked.connect(self.open_code_helper)
+        helper_layout.addWidget(self.open_code_helper_button)
+        helper_layout.addStretch()
         layer_layout.addLayout(layer_selection_layout)
         layer_layout.addLayout(parent_selection_layout)
         layer_layout.addLayout(entity_selection_layout)
         layer_layout.addLayout(intersection_layout)
+        layer_layout.addLayout(helper_layout)
         layer_box.setLayout(layer_layout)
         layer_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         top_layout.addWidget(layer_box, 1)
@@ -1241,6 +1250,13 @@ class KesMISDialog(QDialog):
         self.thread = QThread()
         self.worker = None
         self.field_matching_worker = None
+
+    def open_code_helper(self):
+        """Open the QGIS console helper script file URL."""
+        if not self.code_helper_url:
+            QMessageBox.warning(self, "Helper Not Found", "The console helper script was not found in the plugin folder.")
+            return
+        QDesktopServices.openUrl(QUrl(self.code_helper_url))
 
     def clear_search(self):
         """Clear the search input and show all table rows."""
