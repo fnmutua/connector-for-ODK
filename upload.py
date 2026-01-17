@@ -329,10 +329,11 @@ class Worker(QObject):
 
     def run(self):
         """
-        Fetch entity data with pcode matching, then local intersection:
+        Fetch entity data with local intersection first, then pcode matching for unmatched rows:
         - Uses GeoDataFrame already in EPSG:4326 from reset_data()
         - For Points: buffer 1 km (≈0.009°) and do intersects normally.
         - For Polygons: compute exact intersection areas and pick the settlement with the greatest overlap.
+        - For unmatched rows: fallback to pcode matching if available.
         """
         try:
             if not self._is_running:
@@ -368,62 +369,21 @@ class Worker(QObject):
             processed_items = 0
             total_items = len(self.gdf)
 
-            # ── STEP 1: Pcode matching ─────────────────────────────────────
-            if has_pcode:
-                index_to_pcode = [
-                    (row_idx, row["pcode"])
-                    for row_idx, row in self.gdf.iterrows()
-                    if row.get("pcode")
-                ]
-                self.log.emit(f"Found {len(index_to_pcode)} rows with pcode values.")
-
-                if index_to_pcode:
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        futures = []
-                        for start in range(0, len(index_to_pcode), batch_size):
-                            batch_indices = index_to_pcode[start : start + batch_size]
-                            batch_codes = [p for _, p in batch_indices]
-                            batch_num = (start // batch_size) + 1
-                            futures.append(
-                                executor.submit(
-                                    self.process_pcode_batch,
-                                    start,
-                                    batch_indices,
-                                    batch_codes,
-                                    batch_num,
-                                    len(index_to_pcode),
-                                    batch_size,
-                                )
-                            )
-
-                        for future in as_completed(futures):
-                            if not self._is_running:
-                                self.log.emit("Worker stopped during pcode processing.")
-                                break
-                            processed, batch_results = future.result()
-                            with lock:
-                                processed_items += processed
-                                for row_idx, data in batch_results:
-                                    pcode_entity_data[row_idx] = data
-                                    valid_feature_indices.append(row_idx)
-                                progress = int((processed_items / total_items) * 100)
-                                self.progress.emit(min(progress, 50))  # up to 50% for pcode
-
-            # ── STEP 2: Local intersection for unmatched rows ─────────────
-            # 2.1: Build a list of unmatched indices where geometry is non‐null
-            unmatched_indices = [
+            # ── STEP 1: Local intersection for all rows with geometry ─────────────
+            # 1.1: Build a list of indices where geometry is non‐null
+            intersection_indices = [
                 row_idx
                 for row_idx, _ in self.gdf.iterrows()
-                if row_idx not in pcode_entity_data and self.gdf.loc[row_idx, "geojson"] is not None
+                if self.gdf.loc[row_idx, "geojson"] is not None
             ]
-            self.log.emit(f"Processing {len(unmatched_indices)} unmatched rows with local intersection.")
+            self.log.emit(f"Processing {len(intersection_indices)} rows with local intersection.")
 
-            if unmatched_indices:
-                # 2.2: Fetch settlements (already forced to EPSG:4326 in fetch_settlements_geojson())
+            if intersection_indices:
+                # 1.2: Fetch settlements (already forced to EPSG:4326 in fetch_settlements_geojson())
                 settlements_gdf = self.fetch_settlements_geojson()
 
-                # 2.3: Build a GeoDataFrame of all unmatched features
-                unmatched_gdf_full = self.gdf.loc[unmatched_indices].copy()
+                # 1.3: Build a GeoDataFrame of all features for intersection
+                unmatched_gdf_full = self.gdf.loc[intersection_indices].copy()
                 unmatched_gdf_full["geometry"] = unmatched_gdf_full["geojson"].apply(
                     lambda x: shape(x) if x else None
                 )
@@ -431,7 +391,7 @@ class Worker(QObject):
                     unmatched_gdf_full["geometry"].notnull()
                 ].reset_index(drop=False)
 
-                # 2.4: Split unmatched into points vs polygons vs lines
+                # 1.4: Split into points vs polygons vs lines
                 point_mask = unmatched_gdf_full.geometry.geom_type.isin(["Point", "MultiPoint"])
                 polygon_mask = unmatched_gdf_full.geometry.geom_type.isin(["Polygon",  "MultiPolygon"])
                 line_mask    = unmatched_gdf_full.geometry.geom_type.isin(["LineString", "MultiLineString"])
@@ -442,7 +402,7 @@ class Worker(QObject):
 
                 self.log.emit(f"Points: {len(points_gdf)}, Polygons: {len(polygons_gdf)}, Lines: {len(lines_gdf)}")
 
-                # ── 2A: Handle point‐based intersection via 1 km buffer ──
+                # ── 1A: Handle point‐based intersection via 1 km buffer ──
                 if not points_gdf.empty:
                     # Validate and repair geometries before buffering
                     points_gdf["geometry"] = points_gdf["geometry"].apply(validate_and_repair_geometry)
@@ -512,7 +472,7 @@ class Worker(QObject):
                                         f"(Point) Assigned {parent}-based data for index {original_idx}: {data}"
                                     )
 
-                # ── 2B: Handle polygon‐based intersection by "maximum overlap area" ──
+                # ── 1B: Handle polygon‐based intersection by "maximum overlap area" ──
                 if not polygons_gdf.empty:
                     # Validate and repair geometries before intersection
                     polygons_gdf["geometry"] = polygons_gdf["geometry"].apply(validate_and_repair_geometry)
@@ -529,12 +489,12 @@ class Worker(QObject):
                         original_idx = row["index"]
                         poly_geom = row["geometry"]
 
-                        # 2B.1: Find candidate settlements by bounding‐box intersection
+                        # 1B.1: Find candidate settlements by bounding‐box intersection
                         candidate_idx = list(settlement_sindex.intersection(poly_geom.bounds))
                         if not candidate_idx:
                             continue  # no intersecting settlement → skip
 
-                        # 2B.2: Now compute exact intersection areas with each candidate
+                        # 1B.2: Now compute exact intersection areas with each candidate
                         best_idx = None
                         best_area = 0.0
                         for cand in candidate_idx:
@@ -552,7 +512,7 @@ class Worker(QObject):
                                 self.log.emit(f"Skipping invalid geometry intersection for index {original_idx}: {str(e)}")
                                 continue
 
-                        # 2B.3: If best_idx is not None, assign the parent from that settlement
+                        # 1B.3: If best_idx is not None, assign the parent from that settlement
                         if best_idx is not None:
                             settlement = settlements_gdf.iloc[best_idx]
                             parent = self.parent_entity_name.lower()
@@ -587,7 +547,7 @@ class Worker(QObject):
                                         f"with overlap area {best_area:.6f}: {data}"
                                     )
 
-                # ── 2C: Handle line‐based intersection via plain intersects ──
+                # ── 1C: Handle line‐based intersection via plain intersects ──
                 if not lines_gdf.empty:
                     # Validate and repair geometries before intersection
                     lines_gdf["geometry"] = lines_gdf["geometry"].apply(validate_and_repair_geometry)
@@ -661,6 +621,54 @@ class Worker(QObject):
                                     self.log.emit(
                                         f"(Line) Assigned {parent}-based data for index {original_idx}: {data}"
                                     )
+
+            # ── STEP 2: Pcode matching for unmatched rows ─────────────────────────────────────
+            unmatched_indices = [
+                row_idx
+                for row_idx, _ in self.gdf.iterrows()
+                if row_idx not in pcode_entity_data
+            ]
+            
+            if has_pcode and unmatched_indices:
+                # Filter to only rows that actually have pcode values
+                index_to_pcode = [
+                    (row_idx, self.gdf.loc[row_idx, "pcode"])
+                    for row_idx in unmatched_indices
+                    if row_idx in self.gdf.index and self.gdf.loc[row_idx].get("pcode")
+                ]
+                self.log.emit(f"Found {len(index_to_pcode)} unmatched rows with pcode values for fallback matching.")
+
+                if index_to_pcode:
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = []
+                        for start in range(0, len(index_to_pcode), batch_size):
+                            batch_indices = index_to_pcode[start : start + batch_size]
+                            batch_codes = [p for _, p in batch_indices]
+                            batch_num = (start // batch_size) + 1
+                            futures.append(
+                                executor.submit(
+                                    self.process_pcode_batch,
+                                    start,
+                                    batch_indices,
+                                    batch_codes,
+                                    batch_num,
+                                    len(index_to_pcode),
+                                    batch_size,
+                                )
+                            )
+
+                        for future in as_completed(futures):
+                            if not self._is_running:
+                                self.log.emit("Worker stopped during pcode processing.")
+                                break
+                            processed, batch_results = future.result()
+                            with lock:
+                                processed_items += processed
+                                for row_idx, data in batch_results:
+                                    pcode_entity_data[row_idx] = data
+                                    valid_feature_indices.append(row_idx)
+                                progress = int((processed_items / total_items) * 100)
+                                self.progress.emit(min(progress, 100))  # up to 100% for pcode
 
             # ── FINALIZE ─────────────────────────────────────────────────
             if pcode_entity_data:
@@ -830,7 +838,7 @@ class WorkerLocalGeoJSON(QObject):
             return len(batch_codes), []
 
     def run(self):
-        """Fetch entity data with pcode matching and local buffered geometry intersection."""
+        """Fetch entity data with local buffered geometry intersection first, then pcode matching for unmatched rows."""
         try:
             if not self._is_running:
                 self.log.emit("Worker stopped before starting.")
@@ -865,58 +873,19 @@ class WorkerLocalGeoJSON(QObject):
             processed_items = 0
             total_items = len(self.gdf)
 
-            # Step 1: Pcode matching
-            if has_pcode:
-                index_to_pcode = [
-                    (row_idx, row["pcode"])
-                    for row_idx, row in self.gdf.iterrows()
-                    if row.get("pcode")
-                ]
-                self.log.emit(f"Found {len(index_to_pcode)} rows with pcode values.")
-
-                if index_to_pcode:
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        futures = []
-                        for start in range(0, len(index_to_pcode), batch_size):
-                            batch_indices = index_to_pcode[start:start + batch_size]
-                            batch_codes = [p for _, p in batch_indices]
-                            batch_num = (start // batch_size) + 1
-                            futures.append(executor.submit(
-                                self.process_pcode_batch,
-                                start,
-                                batch_indices,
-                                batch_codes,
-                                batch_num,
-                                len(index_to_pcode),
-                                batch_size
-                            ))
-
-                        for future in as_completed(futures):
-                            if not self._is_running:
-                                self.log.emit("Worker stopped during pcode processing.")
-                                break
-                            processed, batch_results = future.result()
-                            with lock:
-                                processed_items += processed
-                                for row_idx, data in batch_results:
-                                    pcode_entity_data[row_idx] = data
-                                    valid_feature_indices.append(row_idx)
-                                progress = int((processed_items / total_items) * 100)
-                                self.progress.emit(min(progress, 50))  # Up to 50% for pcode
-
-            # Step 2: Local buffered intersection for unmatched rows
-            unmatched_indices = [
+            # Step 1: Local buffered intersection for all rows with geometry
+            intersection_indices = [
                 row_idx for row_idx, _ in self.gdf.iterrows()
-                if row_idx not in pcode_entity_data and self.gdf.loc[row_idx, "geojson"] is not None
+                if self.gdf.loc[row_idx, "geojson"] is not None
             ]
-            self.log.emit(f"Processing {len(unmatched_indices)} unmatched rows with local 0.5 km buffered geometry intersection.")
+            self.log.emit(f"Processing {len(intersection_indices)} rows with local 0.5 km buffered geometry intersection.")
 
-            if unmatched_indices:
+            if intersection_indices:
                 # Fetch settlements GeoJSON (already in EPSG:4326)
                 settlements_gdf = self.fetch_settlements_geojson()
 
-                # Prepare unmatched geometries with 0.5 km buffer
-                unmatched_gdf = self.gdf.loc[unmatched_indices].copy()
+                # Prepare geometries with 0.5 km buffer
+                unmatched_gdf = self.gdf.loc[intersection_indices].copy()
                 unmatched_gdf['geometry'] = unmatched_gdf['geojson'].apply(lambda x: shape(x) if x else None)
                 unmatched_gdf = unmatched_gdf[unmatched_gdf['geometry'].notnull()]
                 
@@ -970,9 +939,54 @@ class WorkerLocalGeoJSON(QObject):
                             self.log.emit(f"No intersection for buffered geometry at index {idx}")
 
                     progress = int((processed_items / total_items) * 100)
-                    self.progress.emit(progress)  # Up to 100% for intersection
+                    self.progress.emit(min(progress, 50))  # Up to 50% for intersection
                 else:
                     self.log.emit("No valid geometries found after filtering.")
+
+            # Step 2: Pcode matching for unmatched rows
+            unmatched_indices = [
+                row_idx for row_idx, _ in self.gdf.iterrows()
+                if row_idx not in pcode_entity_data
+            ]
+            
+            if has_pcode and unmatched_indices:
+                # Filter to only rows that actually have pcode values
+                index_to_pcode = [
+                    (row_idx, self.gdf.loc[row_idx, "pcode"])
+                    for row_idx in unmatched_indices
+                    if row_idx in self.gdf.index and self.gdf.loc[row_idx].get("pcode")
+                ]
+                self.log.emit(f"Found {len(index_to_pcode)} unmatched rows with pcode values for fallback matching.")
+
+                if index_to_pcode:
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = []
+                        for start in range(0, len(index_to_pcode), batch_size):
+                            batch_indices = index_to_pcode[start:start + batch_size]
+                            batch_codes = [p for _, p in batch_indices]
+                            batch_num = (start // batch_size) + 1
+                            futures.append(executor.submit(
+                                self.process_pcode_batch,
+                                start,
+                                batch_indices,
+                                batch_codes,
+                                batch_num,
+                                len(index_to_pcode),
+                                batch_size
+                            ))
+
+                        for future in as_completed(futures):
+                            if not self._is_running:
+                                self.log.emit("Worker stopped during pcode processing.")
+                                break
+                            processed, batch_results = future.result()
+                            with lock:
+                                processed_items += processed
+                                for row_idx, data in batch_results:
+                                    pcode_entity_data[row_idx] = data
+                                    valid_feature_indices.append(row_idx)
+                                progress = int((processed_items / total_items) * 100)
+                                self.progress.emit(min(progress, 100))  # Up to 100% for pcode
 
             if pcode_entity_data:
                 self.log.emit(f"Data fetched successfully for {len(valid_feature_indices)} rows with parent entity '{self.parent_entity_name}'.")
@@ -1207,6 +1221,27 @@ class KesMISDialog(QDialog):
         self.mapping_table.setFixedHeight(250)
         self.mapping_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         mapping_layout.addWidget(self.mapping_table)
+        
+        # Dry Run Options
+        dry_run_layout = QHBoxLayout()
+        self.dry_run_checkbox = QCheckBox("Dry Run (Test Mode)")
+        self.dry_run_checkbox.setChecked(False)
+        self.dry_run_checkbox.setToolTip("Enable to test with a limited number of records before full submission")
+        dry_run_layout.addWidget(self.dry_run_checkbox)
+        dry_run_layout.addWidget(QLabel("Number of records:"))
+        self.dry_run_spinbox = QSpinBox()
+        self.dry_run_spinbox.setMinimum(1)
+        self.dry_run_spinbox.setMaximum(1000)
+        self.dry_run_spinbox.setValue(10)
+        self.dry_run_spinbox.setEnabled(False)
+        self.dry_run_spinbox.setToolTip("Number of records to process in dry run mode")
+        self.dry_run_checkbox.toggled.connect(self.dry_run_spinbox.setEnabled)
+        self.dry_run_checkbox.toggled.connect(self.update_submit_button_text)
+        self.dry_run_spinbox.valueChanged.connect(self.update_submit_button_text)
+        dry_run_layout.addWidget(self.dry_run_spinbox)
+        dry_run_layout.addStretch()
+        mapping_layout.addLayout(dry_run_layout)
+        
         self.submit_button = QPushButton("Submit Data to KeSMIS")
         self.submit_button.setEnabled(False)
         self.submit_button.clicked.connect(self.submit_features)
@@ -1844,6 +1879,16 @@ class KesMISDialog(QDialog):
                 QMessageBox.warning(self, "No Valid Features", "No features with valid parent IDs were found for submission.")
                 return
 
+            # Check for dry run mode
+            is_dry_run = self.dry_run_checkbox.isChecked()
+            dry_run_limit = self.dry_run_spinbox.value() if is_dry_run else None
+            
+            if is_dry_run:
+                original_count = len(features)
+                features = features[:dry_run_limit]
+                self.log_message(f"DRY RUN MODE: Processing {len(features)} of {original_count} features (limit: {dry_run_limit})")
+                self.log_message("This is a test run - data will be submitted to the server but you can review the results.")
+
             # Batch submission setup
             batch_size = 100
             total = len(features)
@@ -1886,7 +1931,10 @@ class KesMISDialog(QDialog):
             self.progress_bar.setValue(100)
             self.progress_bar.setVisible(False)
 
-            summary = f"Done: {all_inserted} inserted, {all_updated} updated, {all_failed} failed."
+            if is_dry_run:
+                summary = f"DRY RUN COMPLETE: {all_inserted} inserted, {all_updated} updated, {all_failed} failed (out of {dry_run_limit} test records)."
+            else:
+                summary = f"Done: {all_inserted} inserted, {all_updated} updated, {all_failed} failed."
             self.log_message(summary)
             for err in all_errors:
                 code = err.get("item", {}).get("code", "<unknown>")
@@ -1902,6 +1950,14 @@ class KesMISDialog(QDialog):
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setVisible(False)
 
+    def update_submit_button_text(self):
+        """Update submit button text based on dry run mode."""
+        if self.dry_run_checkbox.isChecked():
+            limit = self.dry_run_spinbox.value()
+            self.submit_button.setText(f"Submit Data to KeSMIS (Dry Run: {limit} records)")
+        else:
+            self.submit_button.setText("Submit Data to KeSMIS")
+    
     def log_message(self, message):
         """Append message to log widget."""
         self.log_textedit.append(message)
