@@ -6,7 +6,7 @@
 name=Connector for ODK
 qgisMinimumVersion=3.0
 description= Connect to ODK Central, fetch submissions, and visualize field data on QGIS maps. Supports filtering, spatial analysis, and data export.
-version=1.5
+version=1.7
 author=Felix Mutua
 email=mutua@ags.co.ke
 

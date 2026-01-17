@@ -1098,6 +1098,11 @@ class KesMISDialog(QDialog):
         self.pcode_fields = ["settlement_id", "ward_id", "subcounty_id", "county_id"]
         self.is_logged_in = False
         self.settings = QSettings("YourOrganization", "KesMIS")
+        
+        # Load saved token if available (will be used after UI is created)
+        saved_token = self.settings.value("auth_token", "")
+        if saved_token:
+            self.token = saved_token
         # Optional URL where users can download the external code generator script
         self.generate_code_url = self.settings.value("generate_code_url", "")
         if not self.generate_code_url:
@@ -1285,6 +1290,10 @@ class KesMISDialog(QDialog):
         self.thread = QThread()
         self.worker = None
         self.field_matching_worker = None
+        
+        # Try auto-login if we have a saved token
+        if self.token:
+            QTimer.singleShot(100, self.auto_login_with_token)
 
     def open_code_helper(self):
         """Open the QGIS console helper script file URL."""
@@ -1605,6 +1614,8 @@ class KesMISDialog(QDialog):
                 data = response.json()
                 self.token = data.get("data")
                 if not self.token:
+                    self.token = None
+                    self.settings.remove("auth_token")
                     self.log_message("Login failed: No token received from server.")
                     QMessageBox.critical(self, "Login Error", "Login failed: No token received from server.")
                     return
@@ -1612,9 +1623,13 @@ class KesMISDialog(QDialog):
                 self.is_logged_in = True
                 self.log_message(f"Login successful for user '{username}'")
 
-                # Save credentials if checked
+                # Save credentials and token if checked
                 if self.save_credentials.isChecked():
                     self.save_credentials_to_settings()
+                    self.settings.setValue("auth_token", self.token)
+                else:
+                    # Clear token if save credentials is not checked
+                    self.settings.remove("auth_token")
 
                 # Update UI
                 self.log_message("Populating layers…")
@@ -1627,11 +1642,15 @@ class KesMISDialog(QDialog):
                 self.log_message("Login successful!")
             else:
                 self.is_logged_in = False
+                self.token = None
+                self.settings.remove("auth_token")
                 self.log_message(f"Login failed: {response.text}")
                 QMessageBox.critical(self, "Login Error", f"Login failed: {response.text}")
 
         except Exception as e:
             self.is_logged_in = False
+            self.token = None
+            self.settings.remove("auth_token")
             self.log_message(f"Unexpected login error: {str(e)}")
             QMessageBox.critical(self, "Error", f"An unexpected error occurred: {str(e)}")
 
@@ -1645,7 +1664,13 @@ class KesMISDialog(QDialog):
     def on_save_credentials_changed(self, state):
         """Handle checkbox state change for saving credentials."""
         if state == 2 and self.is_logged_in:
+            # Save credentials and token
             self.save_credentials_to_settings()
+            if self.token:
+                self.settings.setValue("auth_token", self.token)
+        elif state == 0:
+            # Unchecked - clear saved token but keep credentials
+            self.settings.remove("auth_token")
 
     def save_credentials_to_settings(self):
         """Save the entered credentials to QSettings."""
@@ -1658,6 +1683,52 @@ class KesMISDialog(QDialog):
         self.settings.setValue("password", password)
 
         self.log_message(f"Credentials saved successfully: URL={url}, Username={username}")
+    
+    def auto_login_with_token(self):
+        """Attempt to auto-login using saved token."""
+        if not self.token:
+            return
+        
+        url = self.url_input.text().rstrip('/')
+        if not url:
+            return
+        
+        try:
+            self.log_message("Attempting auto-login with saved token...")
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "x-access-token": self.token
+            }
+            # Test token validity by making a simple API call
+            response = requests.get(
+                f"{url}/api/v1/models/list",
+                headers=headers,
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                # Token is valid
+                self.is_logged_in = True
+                self.log_message("Auto-login successful with saved token")
+                
+                # Populate UI
+                self.populate_layers()
+                self.fetch_entities(url)
+                self.layer_combo.setEnabled(True)
+                self.parent_combo.setEnabled(True)
+                self.entity_combo.setEnabled(True)
+            else:
+                # Token is invalid, clear it
+                self.log_message("Saved token is invalid or expired. Please login again.")
+                self.token = None
+                self.settings.remove("auth_token")
+                self.is_logged_in = False
+        except Exception as e:
+            # Connection error or other issue
+            self.log_message(f"Auto-login failed: {str(e)}. Please login manually.")
+            self.token = None
+            self.settings.remove("auth_token")
+            self.is_logged_in = False
 
     def populate_layers(self):
         """Populate available layers from QGIS canvas and check for 'code' column."""
