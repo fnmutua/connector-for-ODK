@@ -327,7 +327,8 @@ class Worker(QObject):
             response = requests.post(
                 f"{self.url}/api/v1/data/many/code",
                 headers={"Authorization": f"Bearer {self.token}", "x-access-token": self.token},
-                json={"model": self.parent_entity_name, "codes": batch_codes}
+                json={"model": self.parent_entity_name, "codes": batch_codes},
+                timeout=30
             )
             if response.status_code == 200:
                 payload = response.json()
@@ -875,7 +876,8 @@ class WorkerLocalGeoJSON(QObject):
             response = requests.post(
                 f"{self.url}/api/v1/data/many/code",
                 headers={"Authorization": f"Bearer {self.token}", "x-access-token": self.token},
-                json={"model": self.parent_entity_name, "codes": batch_codes}
+                json={"model": self.parent_entity_name, "codes": batch_codes},
+                timeout=30
             )
             if response.status_code == 200:
                 payload = response.json()
@@ -1833,7 +1835,7 @@ class KesMISDialog(QDialog):
                 "Authorization": f"Bearer {self.token}",
                 "x-access-token": self.token
             }
-            response = requests.get(f"{base_url}/api/v1/models/list", headers=headers)
+            response = requests.get(f"{base_url}/api/v1/models/list", headers=headers, timeout=30)
 
             if response.status_code == 200:
                 data = response.json()
@@ -2062,7 +2064,8 @@ class KesMISDialog(QDialog):
                     resp = requests.post(
                         f"{url}/api/v1/data/import/upsert",
                         json={"model": entity["model"], "data": batch},
-                        headers=headers
+                        headers=headers,
+                        timeout=30
                     )
                     data = resp.json()
                     all_inserted += data.get("insertedCount", 0)

@@ -263,11 +263,52 @@ class Worker(QObject):
                 except Exception as save_error:
                     self.log.emit(f"Warning: Could not save GeoJSON file: {str(save_error)}")
 
-            settlements_gdf = gpd.GeoDataFrame.from_features(geojson["features"])
+            # Safely build GeoDataFrame, skipping/repairing invalid geometries that can
+            # cause "A linearring requires at least 4 coordinates" errors.
+            raw_features = geojson["features"]
+            safe_records = []
+            skipped = 0
+
+            for feat in raw_features:
+                geom_dict = feat.get("geometry")
+                if not geom_dict:
+                    skipped += 1
+                    continue
+
+                try:
+                    geom = shape(geom_dict)
+                except Exception:
+                    # Geometry cannot even be constructed → skip
+                    skipped += 1
+                    continue
+
+                geom = validate_and_repair_geometry(geom)
+                if geom is None or geom.is_empty:
+                    skipped += 1
+                    continue
+
+                # Collect properties; fall back to everything except geometry/type
+                props = feat.get("properties")
+                if props is None:
+                    props = {k: v for k, v in feat.items() if k not in ("geometry", "type")}
+
+                record = dict(props)
+                record["geometry"] = geom
+                safe_records.append(record)
+
+            if not safe_records:
+                raise ValueError("No valid settlement geometries found after cleaning.")
+
+            settlements_gdf = gpd.GeoDataFrame(safe_records, geometry="geometry", crs="EPSG:4326")
+
             # 1) Immediately force CRS to EPSG:4326 (WGS84) so intersection logic in 4326 works correctly
             settlements_gdf.set_crs(epsg=4326, inplace=True)
 
-            self.log.emit(f"Loaded {len(settlements_gdf)} settlement features (CRS={settlements_gdf.crs}).")
+            loaded_count = len(settlements_gdf)
+            self.log.emit(
+                f"Loaded {loaded_count} settlement features (CRS={settlements_gdf.crs}). "
+                f"Skipped {skipped} invalid/empty geometries."
+            )
             return settlements_gdf
 
         except Exception as e:
@@ -775,10 +816,48 @@ class WorkerLocalGeoJSON(QObject):
                 except Exception as save_error:
                     self.log.emit(f"Warning: Could not save GeoJSON file: {str(save_error)}")
             
-            settlements_gdf = gpd.GeoDataFrame.from_features(geojson["features"])
+            # Safely build GeoDataFrame, skipping/repairing invalid geometries that can
+            # cause "A linearring requires at least 4 coordinates" errors.
+            raw_features = geojson["features"]
+            safe_records = []
+            skipped = 0
+
+            for feat in raw_features:
+                geom_dict = feat.get("geometry")
+                if not geom_dict:
+                    skipped += 1
+                    continue
+
+                try:
+                    geom = shape(geom_dict)
+                except Exception:
+                    skipped += 1
+                    continue
+
+                geom = validate_and_repair_geometry(geom)
+                if geom is None or geom.is_empty:
+                    skipped += 1
+                    continue
+
+                props = feat.get("properties")
+                if props is None:
+                    props = {k: v for k, v in feat.items() if k not in ("geometry", "type")}
+
+                record = dict(props)
+                record["geometry"] = geom
+                safe_records.append(record)
+
+            if not safe_records:
+                raise ValueError("No valid settlement geometries found after cleaning.")
+
+            settlements_gdf = gpd.GeoDataFrame(safe_records, geometry="geometry", crs="EPSG:4326")
+
             # Force CRS to WGS84 (EPSG:4326)
             settlements_gdf.set_crs(epsg=4326, inplace=True)
-            self.log.emit(f"Loaded {len(settlements_gdf)} settlement features (CRS={settlements_gdf.crs}).")
+            self.log.emit(
+                f"Loaded {len(settlements_gdf)} settlement features (CRS={settlements_gdf.crs}). "
+                f"Skipped {skipped} invalid/empty geometries."
+            )
             return settlements_gdf
         except Exception as e:
             self.log.emit(f"Error fetching settlements GeoJSON: {str(e)}")

@@ -1,7 +1,7 @@
-# Steps to Release Next Version (1.6)
+# Steps to Release Next Version (1.8)
 
 ## Version Updated
-✅ Version updated from **1.5** to **1.6** in `metadata.txt`
+✅ Version updated from **1.7** to **1.8** in `metadata.txt`
 
 ## Next Steps to Release
 
@@ -39,14 +39,14 @@
 
 1. **Commit your changes**:
    ```bash
-   git add metadata.txt
-   git commit -m "Bump version to 1.6"
+   git add metadata.txt VERSION_RELEASE_STEPS.md
+   git commit -m "Bump version to 1.8"
    ```
 
 2. **Create a version tag**:
    ```bash
-   git tag -a v1.6 -m "Release version 1.6"
-   git push origin v1.6
+   git tag -a v1.8 -m "Release version 1.8"
+   git push origin v1.8
    ```
 
 3. **Create package from tag**:

@@ -199,7 +199,7 @@ class ConnectODK:
         """Fetch projects from ODK Central."""
         projects_api_url = f"{server_url}/v1/projects"
         try:
-            response = requests.get(projects_api_url, auth=(username, password))
+            response = requests.get(projects_api_url, auth=(username, password), timeout=30)
             response.raise_for_status()
             projects = response.json()
 
@@ -211,7 +211,7 @@ class ConnectODK:
         """Fetch forms for the selected project."""
         forms_api_url = f"{server_url}/v1/projects/{project_id}/forms"
         try:
-            response = requests.get(forms_api_url, auth=(username, password))
+            response = requests.get(forms_api_url, auth=(username, password), timeout=30)
             response.raise_for_status()
             forms = response.json()
             return forms
