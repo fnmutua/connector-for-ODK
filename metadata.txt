@@ -5,12 +5,12 @@
 [general]
 name=Connector for ODK
 qgisMinimumVersion=3.0
-description= Connect to ODK Central, fetch submissions, and visualize field data on QGIS maps. Supports filtering, spatial analysis, and data export.
-version=1.8
+description=Connect to ODK Central, split layers, run QA/QC on geodatabases, upload data to KeSMIS, and manage pcode fields — with collapsible in-app help on every tool.
+version=2.0
 author=Felix Mutua
 email=mutua@ags.co.ke
 
-about= The plugin connects to ODK Central, retrieves form submissions, extracts spatial data (e.g., GPS coordinates, points, or geometries), and converts them into a valid vector layer. The resulting GeoJSON can be used for mapping, analysis, or integration into GIS platforms. Additionally, it allows for splitting layers based on select attribute
+about=Connector for ODK is a four-tool QGIS plugin suite. Get Data downloads ODK Central form submissions as map layers. Split Layer creates separate layers for each unique attribute value. QA/QC runs topology, attribute, and geometry checks on File Geodatabase layers and writes issue layers plus PDF reports. Import uploads vector features to KeSMIS with automatic field mapping and spatial parent matching. Version 2.0 adds collapsible help panels, in-session code population for selected layers, a streamlined Import workflow, and responsive dialog layouts.
 
 tracker=https://github.com/fnmutua/connector-for-ODK
 repository=https://github.com/fnmutua/ODK-Connect
@@ -19,11 +19,10 @@ repository=https://github.com/fnmutua/ODK-Connect
 # Recommended items:
 
 hasProcessingProvider=no
-# Uncomment the following line and add your changelog:
-# changelog=
+changelog=Version 2.0: Collapsible help panels on Get Data, Import, QA/QC, and Split Layer. Populate Code in Selected Layers with completion messages. In-session code field editing (no copy layers). QA/QC overwrite for outputs, dictionary download link, and compact layouts. Import workflow simplified (removed local GeoJSON intersection). Responsive UI for smaller screens.
 
 # Tags are comma separated with spaces allowed
-tags=python
+tags=python, odk, odk central, kesmis, qa, qc, geodatabase, import, export
 
 homepage=https://github.com/fnmutua/connector-for-ODK
 category=Web

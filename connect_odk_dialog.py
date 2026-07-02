@@ -30,7 +30,7 @@ from PyQt5.QtWidgets import QLabel
 from PyQt5.QtGui import QPixmap
 
 
-from PyQt5.QtWidgets import QDialog, QComboBox, QLineEdit, QPushButton, QVBoxLayout, QFormLayout, QMessageBox, QTextEdit, QProgressBar, QLabel
+from PyQt5.QtWidgets import QDialog, QComboBox, QLineEdit, QPushButton, QVBoxLayout, QFormLayout, QMessageBox, QTextEdit, QProgressBar, QLabel, QWidget
 from qgis.core import QgsVectorLayer, QgsProject, QgsCoordinateReferenceSystem
 from qgis.gui import QgsMapCanvas
 from PyQt5.QtCore import Qt, QTimer, QSettings
@@ -47,6 +47,8 @@ from PyQt5.QtCore import QThread, pyqtSignal, QObject
 import tempfile
 import os
 from pathlib import Path
+
+from .help_panel import CollapsibleHelpMixin
 
 # Optional imports for advanced functionality
 try:
@@ -150,7 +152,7 @@ class SubmissionWorker(QObject):
 
 
 
-class ConnectODKDialog(QDialog):
+class ConnectODKDialog(QDialog, CollapsibleHelpMixin):
     """Dialog to get user input for ODK Central credentials and form selection."""
  
 
@@ -176,14 +178,14 @@ class ConnectODKDialog(QDialog):
  
     """Dialog to get user input for ODK Central credentials and form selection."""
 
-    def __init__(self, default_url="https://collector.org", default_username="user@gmail.com", default_password="password"):
+    def __init__(self, default_url="", default_username="", default_password=""):
         """Constructor."""
         super().__init__()
 
         self.settings = QSettings("AGS", "ODKConnect")
 
         self.setWindowTitle('Connector for ODK')
-        self.setFixedSize(600, 450)  # Increased height for clear button
+        self.setFixedSize(860, 450)
 
         # Initialize variables
         self.projects = []
@@ -192,7 +194,8 @@ class ConnectODKDialog(QDialog):
         self.parent_entity_name = None
 
         # Create layout
-        layout = QVBoxLayout()
+        work_panel = QWidget()
+        layout = QVBoxLayout(work_panel)
         form_layout = QFormLayout()
 
         # Create widgets
@@ -244,6 +247,7 @@ class ConnectODKDialog(QDialog):
         button_layout.addWidget(self.save_button)
         button_layout.addWidget(self.process_button)
         button_layout.addWidget(self.csv_button)
+        button_layout.addStretch()
 
         # Add progress bar
         self.progress_bar = QProgressBar(self)
@@ -262,14 +266,6 @@ class ConnectODKDialog(QDialog):
         self.clear_log_button = QPushButton("Clear Log")
         self.clear_log_button.clicked.connect(self.clear_log)
 
-        # Add logo and credits
-        logo_label = QLabel()
-        pixmap = QPixmap(':/plugins/connect_odk/logo.svg')
-        if not pixmap.isNull():
-            pixmap = pixmap.scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        logo_label.setPixmap(pixmap)
-        logo_label.setAlignment(Qt.AlignCenter)
-
         credit_label = QLabel('''
             <div style="text-align: center;">
                 <a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">Powered by ODK</a>
@@ -280,7 +276,7 @@ class ConnectODKDialog(QDialog):
 
         disclaimer_label = QLabel('''
             <div style="text-align: center; font-size: 10px; color: gray;">
-                <strong>Disclaimer:</strong> This plugin is not created, endorsed, or affiliated with ODK or its developers. 
+                <strong>Disclaimer:</strong> This plugin is not created, endorsed, or affiliated with ODK or its developers.
                 For official resources, visit <a href="https://getodk.org" style="color: #0078d4; text-decoration: none;">getodk.org</a>.
             </div>
         ''')
@@ -295,9 +291,32 @@ class ConnectODKDialog(QDialog):
         layout.addWidget(credit_label)
         layout.addWidget(disclaimer_label)
 
-        self.setLayout(layout)
+        self._attach_collapsible_help(work_panel, self._help_html(), add_toggle_row=False)
+        button_layout.addWidget(self.toggle_help_button)
         self.submission_thread = QThread()
         self.submission_worker = None
+
+    @staticmethod
+    def _help_html():
+        return """
+        <h3>Get Data</h3>
+        <p>Connect to ODK Central, download form submissions, and load them as a map layer in QGIS.</p>
+
+        <h4>Quick start</h4>
+        <ol>
+            <li>Enter your <b>ODK Central URL</b>, <b>username</b>, and <b>password</b>.</li>
+            <li>Click <b>Login</b> to load projects and forms.</li>
+            <li>Select a <b>project</b> and <b>form</b>.</li>
+            <li>Click <b>Process Form</b> to fetch submissions and add a GeoJSON layer to the map.</li>
+            <li>Use <b>Get CSV</b> to export the processed data as a spreadsheet.</li>
+        </ol>
+
+        <h4>Credentials</h4>
+        <p>Use <b>Save Credentials</b> to store your URL and login details for next time.</p>
+
+        <h4>Outputs</h4>
+        <p>Submissions are converted to GeoJSON (EPSG:4326) and added to your QGIS project. A <code>submissions.json</code> file is also written to the working folder.</p>
+        """
 
     def log_message(self, message):
         """Append a message to the log textedit widget."""

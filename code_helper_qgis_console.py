@@ -1,25 +1,36 @@
 """
-QGIS Python Console helper: ensure a 'code' text field exists on all editable vector
-layers (skipping names containing 'settlement'), populate missing values with unique
-8-character UUIDs, and commit per layer.
-
-How to run inside QGIS:
-- Open QGIS with your project and layers loaded
-- Open Python Console (Plugins → Python Console)
-- Click the Editor button and open this file, then Run, or copy/paste its contents
+QGIS helper: ensure a 'code' text field exists on editable vector layers,
+populate missing values with unique 8-character UUIDs, and commit in the
+current QGIS session.
 """
 
-from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsField, QgsVectorDataProvider
-)
-from qgis.PyQt.QtCore import QVariant
 import uuid
 
+from qgis.core import (
+    QgsProject,
+    QgsVectorLayer,
+    QgsField,
+    QgsVectorDataProvider,
+    edit,
+)
+from qgis.PyQt.QtCore import QVariant
 
-def ensure_edit_mode(layer):
-    if not layer.isEditable():
-        if not layer.startEditing():
-            raise RuntimeError(f"Could not start editing for layer: {layer.name()}")
+
+def is_parent_boundary_layer(layer_name):
+    """Skip reference boundary layers loaded for spatial matching, not data layers."""
+    return layer_name.strip().endswith(" Boundaries")
+
+
+def describe_edit_blockers(layer):
+    """Return provider details and missing capabilities for clearer logs."""
+    provider = layer.dataProvider()
+    caps = provider.capabilities()
+    missing = []
+    if not (caps & QgsVectorDataProvider.AddAttributes):
+        missing.append("AddAttributes")
+    if not (caps & QgsVectorDataProvider.ChangeAttributeValues):
+        missing.append("ChangeAttributeValues")
+    return provider.name(), provider.dataSourceUri(), missing
 
 
 def try_rename_attribute(layer, field_index, new_name):
@@ -35,9 +46,6 @@ def try_rename_attribute(layer, field_index, new_name):
 
 
 def add_field(layer, name, qvariant_type=QVariant.String):
-    caps = layer.dataProvider().capabilities()
-    if not (caps & QgsVectorDataProvider.AddAttributes):
-        raise RuntimeError(f"Provider does not allow adding attributes for layer: {layer.name()}")
     fld = QgsField(name, qvariant_type)
     if not layer.addAttribute(fld):
         raise RuntimeError(f"Failed to add field '{name}' to layer: {layer.name()}")
@@ -69,97 +77,116 @@ def generate_unique_code(existing):
             return c
 
 
-def process_layer(layer):
+def process_layer(layer, log=None):
+    """
+    Add/fill the 'code' field on a vector layer and save edits in session.
+
+    Returns True when the layer was updated and saved, False when skipped.
+    """
+    if log is None:
+        log = print
+
     if not isinstance(layer, QgsVectorLayer):
-        print(f"Skipping non-vector layer: {layer.name()}")
-        return
+        log(f"Skipping non-vector layer: {layer.name()}")
+        return False
 
-    if not layer.isValid() or layer.readOnly():
-        print(f"Skipping invalid/readonly layer: {layer.name()}")
-        return
+    if not layer.isValid():
+        log(f"Skipping invalid layer: {layer.name()}")
+        return False
 
-    if 'settlement' in layer.name().lower():
-        print(f"Skipping settlement layer: {layer.name()}")
-        return
+    if is_parent_boundary_layer(layer.name()):
+        log(f"Skipping parent boundary layer: {layer.name()}")
+        return False
 
-    caps = layer.dataProvider().capabilities()
-    if not (caps & (QgsVectorDataProvider.AddAttributes | QgsVectorDataProvider.ChangeAttributeValues)):
-        print(f"Skipping layer without needed caps: {layer.name()}")
-        return
+    log(f"Processing layer: {layer.name()}")
 
-    print(f"\nProcessing layer: {layer.name()}")
-    ensure_edit_mode(layer)
+    try:
+        with edit(layer):
+            fields = layer.fields()
+            field_names = [f.name() for f in fields]
+            lower_to_index = {name.lower(): idx for idx, name in enumerate(field_names)}
+            code_idx = -1
 
-    fields = layer.fields()
-    field_names = [f.name() for f in fields]
-    lower_to_index = {name.lower(): idx for idx, name in enumerate(field_names)}
-    code_idx = -1
-
-    if 'code' in lower_to_index:
-        idx = lower_to_index['code']
-        actual_name = field_names[idx]
-        if actual_name != 'code':
-            if try_rename_attribute(layer, idx, 'code'):
-                layer.updateFields()
-                code_idx = layer.fields().indexOf('code')
-                print(f"Renamed field '{actual_name}' -> 'code'")
+            if "code" in lower_to_index:
+                idx = lower_to_index["code"]
+                actual_name = field_names[idx]
+                if actual_name != "code":
+                    if try_rename_attribute(layer, idx, "code"):
+                        layer.updateFields()
+                        code_idx = layer.fields().indexOf("code")
+                        log(f"Renamed field '{actual_name}' -> 'code'")
+                    else:
+                        log(f"Could not rename '{actual_name}'. Creating 'code' and copying values...")
+                        new_idx = add_field(layer, "code", QVariant.String)
+                        for f in layer.getFeatures():
+                            layer.changeAttributeValue(f.id(), new_idx, f[idx])
+                        delete_field(layer, idx)
+                        layer.updateFields()
+                        code_idx = layer.fields().indexOf("code")
+                else:
+                    code_idx = idx
+                    log("Found existing 'code' field.")
             else:
-                print(f"Could not rename '{actual_name}'. Creating 'code' and copying values...")
-                new_idx = add_field(layer, 'code', QVariant.String)
-                for f in layer.getFeatures():
-                    layer.changeAttributeValue(f.id(), new_idx, f[idx])
-                delete_field(layer, idx)
-                layer.updateFields()
-                code_idx = layer.fields().indexOf('code')
-        else:
-            code_idx = idx
-            print("Found existing 'code' field.")
-    else:
-        code_idx = add_field(layer, 'code', QVariant.String)
-        print("Created 'code' field.")
+                code_idx = add_field(layer, "code", QVariant.String)
+                log("Created 'code' field.")
 
-    if code_idx < 0:
-        raise RuntimeError(f"Could not locate/create 'code' field for layer: {layer.name()}")
+            if code_idx < 0:
+                raise RuntimeError(f"Could not locate/create 'code' field for layer: {layer.name()}")
 
-    existing_codes = collect_existing_codes(layer, code_idx)
+            existing_codes = collect_existing_codes(layer, code_idx)
+            updated = 0
+            for f in layer.getFeatures():
+                val = f[code_idx]
+                if val is None or str(val).strip() == "":
+                    new_code = generate_unique_code(existing_codes)
+                    layer.changeAttributeValue(f.id(), code_idx, new_code)
+                    updated += 1
 
-    updated = 0
-    for f in layer.getFeatures():
-        val = f[code_idx]
-        if val is None or str(val).strip() == "":
-            new_code = generate_unique_code(existing_codes)
-            layer.changeAttributeValue(f.id(), code_idx, new_code)
-            updated += 1
+            if updated > 0:
+                log(f"Filled {updated} missing code value(s) for: {layer.name()}")
+            else:
+                log(f"All features already had codes in: {layer.name()}")
 
-    if updated > 0:
-        if not layer.commitChanges():
-            layer.rollBack()
-            raise RuntimeError(f"Commit failed for layer: {layer.name()} — {layer.commitErrors()}")
-        print(f"Updated {updated} features and saved edits for: {layer.name()}")
-    else:
-        if layer.isEditable():
-            layer.commitChanges()
-        print(f"No missing codes. Nothing to update for: {layer.name()}")
+    except Exception as e:
+        provider_name, source_uri, missing = describe_edit_blockers(layer)
+        log(f"Could not save 'code' for layer '{layer.name()}': {e}")
+        if missing:
+            log(f"Provider: {provider_name}, missing capabilities: {', '.join(missing)}")
+        log(f"Source: {source_uri}")
+        return False
+
+    layer.updateFields()
+    provider = layer.dataProvider()
+    if hasattr(provider, "reloadData"):
+        provider.reloadData()
+
+    log(f"Saved 'code' field for layer: {layer.name()}")
+    return True
 
 
-def main():
+def main(log=None):
+    if log is None:
+        log = print
+
     layers = list(QgsProject.instance().mapLayers().values())
     if not layers:
-        print("No layers in project.")
+        log("No layers in project.")
         return
 
-    processed = 0
+    saved = 0
+    skipped = 0
     for lyr in layers:
         try:
-            process_layer(lyr)
-            processed += 1
+            if process_layer(lyr, log=log):
+                saved += 1
+            else:
+                skipped += 1
         except Exception as e:
-            print(f"Error on layer '{lyr.name()}': {e}")
+            skipped += 1
+            log(f"Error on layer '{lyr.name()}': {e}")
 
-    print(f"\nDone. Processed {processed} layer(s).")
+    log(f"Done. Saved on {saved} layer(s), skipped {skipped}.")
 
 
 if __name__ == "__main__":
     main()
-
-

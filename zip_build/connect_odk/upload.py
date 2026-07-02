@@ -9,8 +9,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QApplication,
     QTableWidgetItem, QSizePolicy
 )
-from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer, QUrl
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
 from fuzzywuzzy import fuzz
 import json
 import geopandas as gpd
@@ -22,6 +21,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from rapidfuzz import process, fuzz
+
+from .help_panel import CollapsibleHelpMixin, resize_dialog_to_screen
+from .code_helper_qgis_console import process_layer
 
 def validate_and_repair_geometry(geom, tolerance=1e-8):
     """
@@ -327,7 +329,8 @@ class Worker(QObject):
             response = requests.post(
                 f"{self.url}/api/v1/data/many/code",
                 headers={"Authorization": f"Bearer {self.token}", "x-access-token": self.token},
-                json={"model": self.parent_entity_name, "codes": batch_codes}
+                json={"model": self.parent_entity_name, "codes": batch_codes},
+                timeout=30
             )
             if response.status_code == 200:
                 payload = response.json()
@@ -443,45 +446,52 @@ class Worker(QObject):
 
                 self.log.emit(f"Points: {len(points_gdf)}, Polygons: {len(polygons_gdf)}, Lines: {len(lines_gdf)}")
 
-                # ── 1A: Handle point‐based intersection via 1 km buffer ──
+                # ── 1A: Handle point‐based intersection with direct checks ──
                 if not points_gdf.empty:
-                    # Validate and repair geometries before buffering
+                    # Validate and repair geometries
                     points_gdf["geometry"] = points_gdf["geometry"].apply(validate_and_repair_geometry)
                     points_gdf = points_gdf[points_gdf["geometry"].notnull()]
-                    
-                    if not points_gdf.empty:
-                        # Buffer each point by ~1 km ≈ 1/111 degrees
-                        points_gdf["buffered_geom"] = points_gdf.geometry.buffer(1.0 / 111.0)
 
-                    # For all point buffers, do a fast spatial index lookup first, then intersect
+                    # For each point, use spatial index candidates + simple geometry checks
                     for idx_row, row in points_gdf.iterrows():
                         if not self._is_running:
                             break
 
                         original_idx = row["index"]  # original index in self.gdf
-                        buf = row["buffered_geom"]
+                        point_geom = row["geometry"]
 
                         # First find candidate settlements using bounding‐box
-                        candidate_idx = list(
-                            settlements_gdf.sindex.intersection(buf.bounds)
-                        )
+                        candidate_idx = sorted(list(settlements_gdf.sindex.intersection(point_geom.bounds)))
                         if not candidate_idx:
                             continue  # no intersecting settlement → skip
 
-                        best_intersect_id = None
+                        matched_intersect_id = None
+
+                        # Pass 1: strict membership (contains/touches)
                         for cand in candidate_idx:
                             settlement_geom = settlements_gdf.geometry.iloc[cand]
                             try:
-                                if buf.intersects(settlement_geom):
-                                    # We only need any intersect for points; take the first one
-                                    best_intersect_id = cand
+                                if settlement_geom.contains(point_geom) or settlement_geom.touches(point_geom):
+                                    matched_intersect_id = cand
                                     break
                             except Exception as e:
                                 self.log.emit(f"Skipping invalid geometry intersection for point {original_idx}: {str(e)}")
                                 continue
 
-                        if best_intersect_id is not None:
-                            settlement = settlements_gdf.iloc[best_intersect_id]
+                        # Pass 2: fallback to plain intersects
+                        if matched_intersect_id is None:
+                            for cand in candidate_idx:
+                                settlement_geom = settlements_gdf.geometry.iloc[cand]
+                                try:
+                                    if settlement_geom.intersects(point_geom):
+                                        matched_intersect_id = cand
+                                        break
+                                except Exception as e:
+                                    self.log.emit(f"Skipping invalid fallback intersection for point {original_idx}: {str(e)}")
+                                    continue
+
+                        if matched_intersect_id is not None:
+                            settlement = settlements_gdf.iloc[matched_intersect_id]
                             parent = self.parent_entity_name.lower()
                             if parent == "settlement":
                                 key = "settlement_id"
@@ -728,358 +738,6 @@ class Worker(QObject):
             self.finished.emit()
 
 
-class WorkerLocalGeoJSON(QObject):
-    """Worker object to fetch settlements GeoJSON and perform local intersections."""
-    progress = pyqtSignal(int)
-    log = pyqtSignal(str)
-    finished = pyqtSignal()
-    result = pyqtSignal(dict, list)
-
-    def __init__(self, layer, parent_entity_name, url, token):
-        super().__init__()
-        self.layer = layer
-        self.parent_entity_name = parent_entity_name
-        self.url = url
-        self.token = token
-        self.gdf = None
-        self._is_running = True
-
-    def stop(self):
-        """Signal the worker to stop execution."""
-        self._is_running = False
-
-    def buffer_geometry(self, geom, distance_km=0.5):
-        """Buffer a geometry by a distance in kilometers (approx. for EPSG:4326)."""
-        if geom is None:
-            return None
-        distance_deg = distance_km / 111.0  # 1 degree ≈ 111 km
-        return geom.buffer(distance_deg)
-
-    @staticmethod
-    def to_2d(geom):
-        """Convert geometry to 2D by dropping Z dimension."""
-        if geom is None:
-            return None
-        return shape(mapping(force_2d(geom)))
-
-    def fetch_settlements_geojson(self):
-        """Fetch settlements GeoJSON from the server."""
-        try:
-            # Check if we should use a local file
-            if hasattr(self, 'use_local_file') and self.use_local_file and hasattr(self, 'local_filepath'):
-                self.log.emit(f"Using local file: {self.local_filepath}")
-                with open(self.local_filepath, 'r', encoding='utf-8') as f:
-                    geojson = json.load(f)
-            else:
-                # Fetch from server as usual
-                headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
-                self.log.emit("Fetching settlements GeoJSON…")
-                response = requests.get(
-                    f"{self.url}/api/v1/data/geo/minimal",
-                    headers=headers,
-                    params={'model': self.parent_entity_name},
-                    timeout=30
-                )
-                response.raise_for_status()
-                geojson = response.json()
-            
-            if not isinstance(geojson, dict) or "features" not in geojson:
-                raise ValueError("Invalid GeoJSON format")
-            
-            # Save GeoJSON to file (only if not using local file)
-            if not (hasattr(self, 'use_local_file') and self.use_local_file):
-                try:
-                    # Create Documents/ODK_Data directory if it doesn't exist
-                    documents_path = os.path.expanduser("~/Documents")
-                    odk_data_path = os.path.join(documents_path, "ODK_Data")
-                    os.makedirs(odk_data_path, exist_ok=True)
-                    
-                    # Generate filename with timestamp
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"parent({self.parent_entity_name}).geojson"
-                    filepath = os.path.join(odk_data_path, filename)
-                    
-                    # Save the GeoJSON data
-                    with open(filepath, 'w', encoding='utf-8') as f:
-                        json.dump(geojson, f, indent=2, ensure_ascii=False)
-                    
-                    self.log.emit(f"Saved {self.parent_entity_name} GeoJSON to: {filepath}")
-                    
-                    # Add the GeoJSON as a layer to the map
-                    layer_name = f"{self.parent_entity_name.capitalize()} Boundaries"
-                    layer = add_geojson_to_map(filepath, layer_name)
-                    if layer:
-                        self.log.emit(f"Added {layer_name} layer to QGIS map")
-                    else:
-                        self.log.emit(f"Warning: Could not add {layer_name} layer to map")
-                        
-                except Exception as save_error:
-                    self.log.emit(f"Warning: Could not save GeoJSON file: {str(save_error)}")
-            
-            # Safely build GeoDataFrame, skipping/repairing invalid geometries that can
-            # cause "A linearring requires at least 4 coordinates" errors.
-            raw_features = geojson["features"]
-            safe_records = []
-            skipped = 0
-
-            for feat in raw_features:
-                geom_dict = feat.get("geometry")
-                if not geom_dict:
-                    skipped += 1
-                    continue
-
-                try:
-                    geom = shape(geom_dict)
-                except Exception:
-                    skipped += 1
-                    continue
-
-                geom = validate_and_repair_geometry(geom)
-                if geom is None or geom.is_empty:
-                    skipped += 1
-                    continue
-
-                props = feat.get("properties")
-                if props is None:
-                    props = {k: v for k, v in feat.items() if k not in ("geometry", "type")}
-
-                record = dict(props)
-                record["geometry"] = geom
-                safe_records.append(record)
-
-            if not safe_records:
-                raise ValueError("No valid settlement geometries found after cleaning.")
-
-            settlements_gdf = gpd.GeoDataFrame(safe_records, geometry="geometry", crs="EPSG:4326")
-
-            # Force CRS to WGS84 (EPSG:4326)
-            settlements_gdf.set_crs(epsg=4326, inplace=True)
-            self.log.emit(
-                f"Loaded {len(settlements_gdf)} settlement features (CRS={settlements_gdf.crs}). "
-                f"Skipped {skipped} invalid/empty geometries."
-            )
-            return settlements_gdf
-        except Exception as e:
-            self.log.emit(f"Error fetching settlements GeoJSON: {str(e)}")
-            raise
-
-    def process_pcode_batch(self, start, batch_indices, batch_codes, batch_num, total_items, batch_size):
-        """Process a batch of pcode-based queries."""
-        if not self._is_running:
-            return 0, []
-        try:
-            self.log.emit(
-                f"Processing pcode batch {batch_num} "
-                f"({start+1}–{min(start+batch_size, total_items)} of {total_items})"
-            )
-            response = requests.post(
-                f"{self.url}/api/v1/data/many/code",
-                headers={"Authorization": f"Bearer {self.token}", "x-access-token": self.token},
-                json={"model": self.parent_entity_name, "codes": batch_codes}
-            )
-            if response.status_code == 200:
-                payload = response.json()
-                records = payload.get("data", [])
-                code_map = {r["code"]: r for r in records}
-                batch_results = []
-                for row_idx, pcode in batch_indices:
-                    rec = code_map.get(pcode)
-                    if rec and rec.get("id"):
-                        parent = self.parent_entity_name.lower()
-                        if parent == "settlement":
-                            key = "settlement_id"
-                        elif parent == "ward":
-                            key = "ward_id"
-                        elif parent == "subcounty":
-                            key = "subcounty_id"
-                        elif parent == "county":
-                            key = "county_id"
-                        else:
-                            key = None
-                        if key:
-                            data = {
-                                key: int(rec["id"]) if rec.get("id") is not None else None,
-                                **({"settlement_id": int(rec.get("settlement_id")) if rec.get("settlement_id") is not None else None} if key != "settlement_id" else {}),
-                                **({"ward_id": int(rec.get("ward_id")) if rec.get("ward_id") is not None else None} if key != "ward_id" else {}),
-                                **({"subcounty_id": int(rec.get("subcounty_id")) if rec.get("subcounty_id") is not None else None} if key != "subcounty_id" else {}),
-                                **({"county_id": int(rec.get("county_id")) if rec.get("county_id") is not None else None} if key != "county_id" else {})
-                            }
-                            batch_results.append((row_idx, data))
-                            self.log.emit(f"Batch-fetched data for index {row_idx}: {data}")
-                    else:
-                        self.log.emit(f"No data for pcode '{pcode}' at index {row_idx}")
-                return len(batch_codes), batch_results
-            else:
-                self.log.emit(f"Batch {batch_num} request failed: {response.text}")
-                return len(batch_codes), []
-        except Exception as e:
-            self.log.emit(f"Batch {batch_num} error: {str(e)}")
-            return len(batch_codes), []
-
-    def run(self):
-        """Fetch entity data with local buffered geometry intersection first, then pcode matching for unmatched rows."""
-        try:
-            if not self._is_running:
-                self.log.emit("Worker stopped before starting.")
-                self.result.emit({}, [])
-                self.finished.emit()
-                return
-
-            # 1) Ensure self.gdf exists
-            if self.gdf is None:
-                self.log.emit("No GeoDataFrame available; aborting.")
-                self.result.emit({}, [])
-                self.finished.emit()
-                return
-
-            # 2) Verify we're in EPSG:4326
-            if self.gdf.crs is None or self.gdf.crs.to_epsg() != 4326:
-                self.log.emit("Error: GeoDataFrame must be in EPSG:4326")
-                self.result.emit({}, [])
-                self.finished.emit()
-                return
-
-            # 3) Check for "pcode" column
-            layer_fields = [f.name() for f in self.layer.fields()]
-            has_pcode = 'pcode' in layer_fields
-            self.log.emit(f"Pcode column {'found' if has_pcode else 'not found'} in layer.")
-
-            pcode_entity_data = {}
-            valid_feature_indices = []
-            lock = threading.Lock()
-            batch_size = 500
-            max_workers = 3
-            processed_items = 0
-            total_items = len(self.gdf)
-
-            # Step 1: Local buffered intersection for all rows with geometry
-            intersection_indices = [
-                row_idx for row_idx, _ in self.gdf.iterrows()
-                if self.gdf.loc[row_idx, "geojson"] is not None
-            ]
-            self.log.emit(f"Processing {len(intersection_indices)} rows with local 0.5 km buffered geometry intersection.")
-
-            if intersection_indices:
-                # Fetch settlements GeoJSON (already in EPSG:4326)
-                settlements_gdf = self.fetch_settlements_geojson()
-
-                # Prepare geometries with 0.5 km buffer
-                unmatched_gdf = self.gdf.loc[intersection_indices].copy()
-                unmatched_gdf['geometry'] = unmatched_gdf['geojson'].apply(lambda x: shape(x) if x else None)
-                unmatched_gdf = unmatched_gdf[unmatched_gdf['geometry'].notnull()]
-                
-                # Validate and repair geometries before buffering
-                unmatched_gdf['geometry'] = unmatched_gdf['geometry'].apply(validate_and_repair_geometry)
-                unmatched_gdf = unmatched_gdf[unmatched_gdf['geometry'].notnull()]
-                
-                if not unmatched_gdf.empty:
-                    # Apply buffer to all geometry types
-                    unmatched_gdf['geometry'] = unmatched_gdf['geometry'].apply(self.buffer_geometry)
-                    unmatched_gdf = gpd.GeoDataFrame(unmatched_gdf, geometry='geometry', crs="EPSG:4326")
-
-                    self.log.emit(f"Processing {len(unmatched_gdf)} buffered geometries for intersection...")
-                    
-                    # Perform spatial join with error handling
-                    try:
-                        intersections = gpd.sjoin(unmatched_gdf, settlements_gdf, how="left", predicate="intersects")
-                    except Exception as e:
-                        self.log.emit(f"Error during spatial join, skipping batch: {str(e)}")
-                        return
-                    
-                    for idx, row in intersections.iterrows():
-                        if not pd.isna(row['index_right']):
-                            row_idx = idx
-                            settlement = settlements_gdf.loc[row['index_right']]
-                            parent = self.parent_entity_name.lower()
-                            if parent == "settlement":
-                                key = "settlement_id"
-                            elif parent == "ward":
-                                key = "ward_id"
-                            elif parent == "subcounty":
-                                key = "subcounty_id"
-                            elif parent == "county":
-                                key = "county_id"
-                            else:
-                                key = None
-                            if key and settlement.get("id"):
-                                data = {
-                                    key: int(settlement["id"]) if settlement.get("id") is not None else None,
-                                    **({"settlement_id": int(settlement.get("settlement_id"))} if key != "settlement_id" else {}),
-                                    **({"ward_id": int(settlement.get("ward_id"))} if key != "ward_id" else {}),
-                                    **({"subcounty_id": int(settlement.get("subcounty_id"))} if key != "subcounty_id" else {}),
-                                    **({"county_id": int(settlement.get("county_id"))} if key != "county_id" else {}),
-                                }
-                                with lock:
-                                    pcode_entity_data[row_idx] = data
-                                    valid_feature_indices.append(row_idx)
-                                    processed_items += 1
-                                    self.log.emit(f"Assigned {parent}-based data for index {row_idx}: {data}")
-                        else:
-                            self.log.emit(f"No intersection for buffered geometry at index {idx}")
-
-                    progress = int((processed_items / total_items) * 100)
-                    self.progress.emit(min(progress, 50))  # Up to 50% for intersection
-                else:
-                    self.log.emit("No valid geometries found after filtering.")
-
-            # Step 2: Pcode matching for unmatched rows
-            unmatched_indices = [
-                row_idx for row_idx, _ in self.gdf.iterrows()
-                if row_idx not in pcode_entity_data
-            ]
-            
-            if has_pcode and unmatched_indices:
-                # Filter to only rows that actually have pcode values
-                index_to_pcode = [
-                    (row_idx, self.gdf.loc[row_idx, "pcode"])
-                    for row_idx in unmatched_indices
-                    if row_idx in self.gdf.index and self.gdf.loc[row_idx].get("pcode")
-                ]
-                self.log.emit(f"Found {len(index_to_pcode)} unmatched rows with pcode values for fallback matching.")
-
-                if index_to_pcode:
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        futures = []
-                        for start in range(0, len(index_to_pcode), batch_size):
-                            batch_indices = index_to_pcode[start:start + batch_size]
-                            batch_codes = [p for _, p in batch_indices]
-                            batch_num = (start // batch_size) + 1
-                            futures.append(executor.submit(
-                                self.process_pcode_batch,
-                                start,
-                                batch_indices,
-                                batch_codes,
-                                batch_num,
-                                len(index_to_pcode),
-                                batch_size
-                            ))
-
-                        for future in as_completed(futures):
-                            if not self._is_running:
-                                self.log.emit("Worker stopped during pcode processing.")
-                                break
-                            processed, batch_results = future.result()
-                            with lock:
-                                processed_items += processed
-                                for row_idx, data in batch_results:
-                                    pcode_entity_data[row_idx] = data
-                                    valid_feature_indices.append(row_idx)
-                                progress = int((processed_items / total_items) * 100)
-                                self.progress.emit(min(progress, 100))  # Up to 100% for pcode
-
-            if pcode_entity_data:
-                self.log.emit(f"Data fetched successfully for {len(valid_feature_indices)} rows with parent entity '{self.parent_entity_name}'.")
-            else:
-                self.log.emit(f"No data fetched for parent entity '{self.parent_entity_name}'.")
-
-            self.result.emit(pcode_entity_data, valid_feature_indices)
-            self.finished.emit()
-
-        except Exception as e:
-            self.log.emit(f"Error fetching entity data: {str(e)}")
-            self.finished.emit()
-
-
 class FieldMatchingWorker(QObject):
     """Worker object to run field matching in a background thread."""
     progress = pyqtSignal(int)  # Emit progress percentage
@@ -1164,11 +822,11 @@ class FieldMatchingWorker(QObject):
             self.finished.emit()
 
 
-class KesMISDialog(QDialog):
+class KesMISDialog(QDialog, CollapsibleHelpMixin):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Export data to KeSMIS")
-        self.setMinimumSize(800, 700)
+        resize_dialog_to_screen(self, min_width=720, min_height=600, max_width=960, max_height=800)
 
         # Initialize variables
         self.token = None
@@ -1182,26 +840,6 @@ class KesMISDialog(QDialog):
         saved_token = self.settings.value("auth_token", "")
         if saved_token:
             self.token = saved_token
-        # Optional URL where users can download the external code generator script
-        self.generate_code_url = self.settings.value("generate_code_url", "")
-        if not self.generate_code_url:
-            try:
-                plugin_root = os.path.dirname(__file__)
-                gen_path = os.path.join(plugin_root, "generate_code.py")
-                if os.path.exists(gen_path):
-                    # Use file URL to the script in plugin root
-                    self.generate_code_url = f"file:///{gen_path.replace(chr(92), '/')}"
-            except Exception:
-                pass
-        # Optional URL to open local QGIS console helper script
-        self.code_helper_url = ""
-        try:
-            plugin_root = os.path.dirname(__file__)
-            helper_path = os.path.join(plugin_root, "code_helper_qgis_console.py")
-            if os.path.exists(helper_path):
-                self.code_helper_url = f"file:///{helper_path.replace(chr(92), '/')}"
-        except Exception:
-            pass
         self.valid_feature_indices = []
         self.gdf = None
         self._full_table_data = []
@@ -1264,23 +902,14 @@ class KesMISDialog(QDialog):
         self.entity_combo.setPlaceholderText("Search entities...")
         entity_selection_layout.addWidget(QLabel("Select Entity:"))
         entity_selection_layout.addWidget(self.entity_combo)
-        intersection_layout = QHBoxLayout()
-        self.local_intersection_check = QCheckBox("Use Local GeoJSON Intersection")
-        self.local_intersection_check.setChecked(False)
-        intersection_layout.addWidget(QLabel("Intersection Method:"))
-        intersection_layout.addWidget(self.local_intersection_check)
-        intersection_layout.addStretch()
-        # Helper to open the QGIS console script for adding 'code'
         helper_layout = QHBoxLayout()
-        self.open_code_helper_button = QPushButton("Open 'code' helper script")
-        self.open_code_helper_button.setEnabled(bool(self.code_helper_url))
-        self.open_code_helper_button.clicked.connect(self.open_code_helper)
-        helper_layout.addWidget(self.open_code_helper_button)
+        self.populate_code_button = QPushButton("Populate Code in Selected Layers")
+        self.populate_code_button.clicked.connect(self.populate_code_in_all_layers)
+        helper_layout.addWidget(self.populate_code_button)
         helper_layout.addStretch()
         layer_layout.addLayout(layer_selection_layout)
         layer_layout.addLayout(parent_selection_layout)
         layer_layout.addLayout(entity_selection_layout)
-        layer_layout.addLayout(intersection_layout)
         layer_layout.addLayout(helper_layout)
         layer_box.setLayout(layer_layout)
         layer_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -1346,9 +975,12 @@ class KesMISDialog(QDialog):
         self.log_textedit.setFixedHeight(100)
         self.log_textedit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         log_layout.addWidget(self.log_textedit)
+        log_actions = QHBoxLayout()
         self.clear_log_button = QPushButton("Clear Log")
         self.clear_log_button.clicked.connect(self.clear_log)
-        log_layout.addWidget(self.clear_log_button)
+        log_actions.addWidget(self.clear_log_button)
+        log_actions.addStretch()
+        log_layout.addLayout(log_actions)
         log_box.setLayout(log_layout)
 
         # Add to main layout
@@ -1361,9 +993,14 @@ class KesMISDialog(QDialog):
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setWidget(main_widget)
-        dialog_layout = QVBoxLayout()
-        dialog_layout.addWidget(scroll_area)
-        self.setLayout(dialog_layout)
+
+        work_panel = QWidget()
+        work_layout = QVBoxLayout(work_panel)
+        work_layout.setContentsMargins(0, 0, 0, 0)
+        work_layout.addWidget(scroll_area)
+
+        self._attach_collapsible_help(work_panel, self._help_html(), add_toggle_row=False)
+        log_actions.addWidget(self.toggle_help_button)
 
         # Thread for background processing
         self.thread = QThread()
@@ -1374,12 +1011,143 @@ class KesMISDialog(QDialog):
         if self.token:
             QTimer.singleShot(100, self.auto_login_with_token)
 
-    def open_code_helper(self):
-        """Open the QGIS console helper script file URL."""
-        if not self.code_helper_url:
-            QMessageBox.warning(self, "Helper Not Found", "The console helper script was not found in the plugin folder.")
+    @staticmethod
+    def _help_html():
+        return """
+        <h3>Import to KeSMIS</h3>
+        <p>Upload QGIS vector layer features to a KeSMIS server with automatic field mapping and parent-entity assignment.</p>
+
+        <h4>Quick start</h4>
+        <ol>
+            <li><b>Server Login</b> &mdash; enter the KeSMIS URL, username, and password, then click <b>Login</b>.</li>
+            <li><b>Select Layer</b> &mdash; choose the QGIS vector layer to export.</li>
+            <li><b>Parent entity</b> &mdash; pick <code>settlement</code> or <code>ward</code> for spatial matching.</li>
+            <li><b>Select Entity</b> &mdash; choose the API entity/model to submit to.</li>
+            <li>Review <b>Field Mapping</b>, then click <b>Submit Data to KeSMIS</b>.</li>
+        </ol>
+
+        <h4>Field mapping</h4>
+        <p>Layer fields are matched to API fields automatically. Use the filter box to search mappings and adjust API field selections in the table.</p>
+
+        <h4>Dry run</h4>
+        <p>Enable <b>Dry Run</b> to test with a limited number of records before a full submission.</p>
+
+        <h4>Code column</h4>
+        <p>Layers should include a <code>code</code> column for pcode matching. Click <b>Populate Code in Selected Layers</b> to add or fill missing codes directly on the selected layers in your current QGIS session.</p>
+        """
+
+    def populate_code_in_all_layers(self):
+        """Add or fill the 'code' field on user-selected vector layers."""
+        layers = [
+            layer for layer in QgsProject.instance().mapLayers().values()
+            if isinstance(layer, QgsVectorLayer)
+        ]
+        if not layers:
+            self.log_message("No vector layers found in the project.")
+            QMessageBox.information(self, "Populate Code", "No vector layers found in the project.")
             return
-        QDesktopServices.openUrl(QUrl(self.code_helper_url))
+
+        selected_layers = self._select_layers_for_code(layers)
+        if not selected_layers:
+            self.log_message("Populate code cancelled or no layers selected.")
+            return
+
+        self.populate_code_button.setEnabled(False)
+        self.log_message(f"Populating 'code' on {len(selected_layers)} selected layer(s)...")
+        QApplication.processEvents()
+
+        success = 0
+        skipped = 0
+        errors = 0
+        for layer in selected_layers:
+            try:
+                if process_layer(layer, log=self.log_message):
+                    success += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                errors += 1
+                self.log_message(f"Error on layer '{layer.name()}': {e}")
+
+        self.log_message(f"Done. Saved on {success} layer(s), skipped {skipped}, errors {errors}.")
+        self.populate_layers()
+        if self.layer_combo.currentData():
+            self.reset_data()
+        self.populate_code_button.setEnabled(True)
+
+        if success > 0 and errors == 0 and skipped == 0:
+            QMessageBox.information(
+                self,
+                "Populate Code",
+                f"Successfully populated code on {success} layer(s).",
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "Populate Code",
+                f"Finished with issues.\n\n"
+                f"Saved: {success}\n"
+                f"Skipped: {skipped}\n"
+                f"Errors: {errors}\n\n"
+                f"See the log for details.",
+            )
+
+    def _select_layers_for_code(self, layers):
+        """Ask the user which loaded vector layers should receive/fill code values."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Layers for Code")
+        dialog.setMinimumWidth(340)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+        scroll_widget = QWidget()
+        checkbox_layout = QVBoxLayout(scroll_widget)
+        checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        checkbox_layout.setSpacing(2)
+        checkboxes = []
+
+        for layer in layers:
+            checkbox = QCheckBox(layer.name())
+            checkbox.setChecked(not layer.name().strip().endswith(" Boundaries"))
+            checkbox.setProperty("layer_id", layer.id())
+            checkboxes.append(checkbox)
+            checkbox_layout.addWidget(checkbox)
+
+        scroll_area.setWidget(scroll_widget)
+        layout.addWidget(scroll_area)
+
+        action_layout = QHBoxLayout()
+        select_all_button = QPushButton("Select All")
+        clear_button = QPushButton("Clear")
+        ok_button = QPushButton("Run")
+        cancel_button = QPushButton("Cancel")
+
+        select_all_button.clicked.connect(lambda: [cb.setChecked(True) for cb in checkboxes])
+        clear_button.clicked.connect(lambda: [cb.setChecked(False) for cb in checkboxes])
+        ok_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+
+        action_layout.addWidget(select_all_button)
+        action_layout.addWidget(clear_button)
+        action_layout.addStretch()
+        action_layout.addWidget(ok_button)
+        action_layout.addWidget(cancel_button)
+        layout.addLayout(action_layout)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return []
+
+        selected_layer_ids = {
+            checkbox.property("layer_id")
+            for checkbox in checkboxes
+            if checkbox.isChecked()
+        }
+        return [layer for layer in layers if layer.id() in selected_layer_ids]
 
     def clear_search(self):
         """Clear the search input and show all table rows."""
@@ -1434,39 +1202,13 @@ class KesMISDialog(QDialog):
                 srid = layer.crs().postgisSrid()
                 self.log_message(f"Layer CRS SRID detected: {srid}")
 
-                # Warn if selected layer lacks 'code' column
+                # Non-blocking hint: the populate-code workflow can fix this.
                 layer_fields = [f.name() for f in layer.fields()]
                 if "code" not in layer_fields:
-                    # Build a unified warning offering both options if available
-                    gen_link_html = f"Download: <a href=\"{self.generate_code_url}\">generate_code.py</a>" if self.generate_code_url else None
-                    helper_link_html = f"Alternative (QGIS Console): <a href=\"{self.code_helper_url}\">code_helper_qgis_console.py</a>" if getattr(self, "code_helper_url", "") else None
-
-                    parts = [
-                        "The selected layer does not have a 'code' column.",
-                        "\n\n",
-                        "Option 1: Run the external generator script, then reload the layer.",
-                    ]
-                    if gen_link_html:
-                        parts.extend(["\n", gen_link_html])
-                    parts.extend([
-                        "\n\n",
-                        "Option 2: Use the QGIS Python Console helper to add/populate 'code' across loaded layers, then reload.",
-                    ])
-                    if helper_link_html:
-                        parts.extend(["\n", helper_link_html])
-
-                    message_text = "".join(parts)
-
-                    # Log concise hint
-                    self.log_message("Selected layer missing 'code'. See dialog for generator and QGIS helper options.")
-
-                    msg = QMessageBox(self)
-                    msg.setIcon(QMessageBox.Warning)
-                    msg.setWindowTitle("Missing 'code' column")
-                    msg.setText(message_text)
-                    msg.setTextFormat(Qt.RichText)
-                    msg.setStandardButtons(QMessageBox.Ok)
-                    msg.exec_()
+                    self.log_message(
+                        "Selected layer missing 'code'. Use Populate Code in Selected Layers "
+                        "to add/fill it on the current layer."
+                    )
 
                 # 2) Build a list of GeoJSON‐like feature dicts
                 features = [
@@ -1584,21 +1326,12 @@ class KesMISDialog(QDialog):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
 
-        # Choose worker based on intersection method
-        if self.local_intersection_check.isChecked():
-            self.worker = WorkerLocalGeoJSON(
-                self.layer_combo.currentData(),
-                self.parent_combo.currentText(),
-                self.url_input.text(),
-                self.token
-            )
-        else:
-            self.worker = Worker(
-                self.layer_combo.currentData(),
-                self.parent_combo.currentText(),
-                self.url_input.text(),
-                self.token
-            )
+        self.worker = Worker(
+            self.layer_combo.currentData(),
+            self.parent_combo.currentText(),
+            self.url_input.text(),
+            self.token
+        )
 
         # Set the local file flag and path if using local file
         if use_local_file:
@@ -1810,20 +1543,12 @@ class KesMISDialog(QDialog):
             self.is_logged_in = False
 
     def populate_layers(self):
-        """Populate available layers from QGIS canvas and check for 'code' column."""
+        """Populate available layers from QGIS canvas."""
         self.layer_combo.clear()
         layers = QgsProject.instance().mapLayers().values()
         for layer in layers:
             if isinstance(layer, QgsVectorLayer):
                 self.layer_combo.addItem(layer.name(), layer)
-                layer_fields = [f.name() for f in layer.fields()]
-                if "code" not in layer_fields:
-                    hint = [f"Layer '{layer.name()}' missing 'code'."]
-                    if self.generate_code_url:
-                        hint.append(" Use generator: generate_code.py.")
-                    if getattr(self, "code_helper_url", ""):
-                        hint.append(" Or open QGIS helper: code_helper_qgis_console.py.")
-                    self.log_message("".join(hint))
         self.layer_combo.setEnabled(True)
 
     def fetch_entities(self, base_url):
@@ -1833,7 +1558,7 @@ class KesMISDialog(QDialog):
                 "Authorization": f"Bearer {self.token}",
                 "x-access-token": self.token
             }
-            response = requests.get(f"{base_url}/api/v1/models/list", headers=headers)
+            response = requests.get(f"{base_url}/api/v1/models/list", headers=headers, timeout=30)
 
             if response.status_code == 200:
                 data = response.json()
@@ -2062,7 +1787,8 @@ class KesMISDialog(QDialog):
                     resp = requests.post(
                         f"{url}/api/v1/data/import/upsert",
                         json={"model": entity["model"], "data": batch},
-                        headers=headers
+                        headers=headers,
+                        timeout=30
                     )
                     data = resp.json()
                     all_inserted += data.get("insertedCount", 0)

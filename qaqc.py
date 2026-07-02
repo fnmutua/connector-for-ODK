@@ -1,5 +1,6 @@
 import sys
 import os
+import shutil
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -12,9 +13,11 @@ from fuzzywuzzy import process
 from PyQt5.QtWidgets import (
     QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox, QLineEdit,
     QSpinBox, QFileDialog, QHBoxLayout, QMessageBox, QGroupBox,
-    QTextEdit, QScrollArea, QGridLayout, QWidget, QApplication
+    QTextEdit, QTextBrowser, QScrollArea, QGridLayout, QWidget, QApplication, QSizePolicy,
+    QSplitter,
 )
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QGuiApplication, QDesktopServices
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeatureRequest, QgsFields, QgsFeature, QgsWkbTypes
 )
@@ -23,7 +26,8 @@ class ProcessGDBDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Quality Assurance / Quality Control")
-        self.setFixedSize(1000, 800)
+        self.setMinimumSize(480, 420)
+        self._resize_to_available_screen()
 
         # Set the Excel file path relative to the plugin directory
         plugin_dir = os.path.dirname(__file__)
@@ -33,49 +37,50 @@ class ProcessGDBDialog(QDialog):
         # Check if the Excel file exists
         if not os.path.exists(self.excel_file):
             self.excel_file = None
-            print(f"Error: Excel file not found at {self.excel_file}")
+            print(f"Warning: dictionary.xlsx not found in plugin folder: {plugin_dir}")
 
-        # Main layout for the dialog
-        main_layout = QVBoxLayout()
+        content_widget = QWidget()
+        main_layout = QVBoxLayout(content_widget)
+        main_layout.setSpacing(8)
 
-        # Top label
-        self.label = QLabel("Select a GeoDatabase, output folder, and set criteria")
-        main_layout.addWidget(self.label)
-
-        # Horizontal layout for select inputs (left) and parameters (right)
-        top_hbox = QHBoxLayout()
-
-        # Left side: Select inputs panel (50% width)
+        # Stack inputs and parameters vertically so narrow screens stay usable
         select_inputs_box = QGroupBox("Select Inputs")
         select_inputs_layout = QVBoxLayout()
-        select_inputs_layout.setSpacing(10)
+        select_inputs_layout.setContentsMargins(8, 6, 8, 6)
+        select_inputs_layout.setSpacing(4)
 
-        # GeoDatabase selection
         self.gdb_button = QPushButton("Select GeoDatabase")
         self.gdb_button.clicked.connect(self.select_gdb)
         self.gdb_label = QLabel("No GeoDatabase selected")
         self.gdb_label.setStyleSheet("font-style: italic; color: gray;")
-        select_inputs_layout.addWidget(self.gdb_button)
-        select_inputs_layout.addWidget(self.gdb_label)
+        self.gdb_label.setWordWrap(True)
+        self.gdb_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.gdb_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        gdb_row = QHBoxLayout()
+        gdb_row.setSpacing(8)
+        gdb_row.addWidget(self.gdb_button, 0)
+        gdb_row.addWidget(self.gdb_label, 1)
+        select_inputs_layout.addLayout(gdb_row)
 
-        # Output folder selection
         self.output_button = QPushButton("Select Output Folder")
         self.output_button.setEnabled(False)
         self.output_button.clicked.connect(self.select_output_folder)
         self.output_label = QLabel("No output folder selected")
         self.output_label.setStyleSheet("font-style: italic; color: gray;")
-        select_inputs_layout.addWidget(self.output_button)
-        select_inputs_layout.addWidget(self.output_label)
-
-        # Add stretch to push content up
-        select_inputs_layout.addStretch()
+        self.output_label.setWordWrap(True)
+        self.output_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.output_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        output_row = QHBoxLayout()
+        output_row.setSpacing(8)
+        output_row.addWidget(self.output_button, 0)
+        output_row.addWidget(self.output_label, 1)
+        select_inputs_layout.addLayout(output_row)
         select_inputs_box.setLayout(select_inputs_layout)
+        main_layout.addWidget(select_inputs_box)
 
-        # Right side: Parameters (50% width)
         parameters_box = QGroupBox("Set Parameters")
         parameters_layout = QVBoxLayout()
 
-        # Angular Parameters Group
         params_group = QGroupBox("Linear Feature Parameters")
         angular_params_layout = QVBoxLayout()
         self.min_angle_spinbox = QSpinBox()
@@ -91,7 +96,6 @@ class ProcessGDBDialog(QDialog):
         params_group.setLayout(angular_params_layout)
         parameters_layout.addWidget(params_group)
 
-        # Length Parameters Group
         length_group = QGroupBox("Length Parameters")
         length_params_layout = QVBoxLayout()
         self.min_length_spinbox = QSpinBox()
@@ -103,30 +107,31 @@ class ProcessGDBDialog(QDialog):
         parameters_layout.addWidget(length_group)
 
         parameters_box.setLayout(parameters_layout)
+        main_layout.addWidget(parameters_box)
 
-        # Add select inputs and parameters to top_hbox with equal stretch
-        top_hbox.addWidget(select_inputs_box, 1)
-        top_hbox.addWidget(parameters_box, 1)
-        main_layout.addLayout(top_hbox)
-
-        # Layers selection (100% width)
         self.layer_selection_box = QGroupBox("Select Layers")
+        layer_box_layout = QVBoxLayout()
+        layer_box_layout.setContentsMargins(8, 6, 8, 6)
+        layer_box_layout.setSpacing(4)
         self.layer_selection_layout = QGridLayout()
+        self.layer_selection_layout.setContentsMargins(0, 0, 0, 0)
+        self.layer_selection_layout.setHorizontalSpacing(12)
+        self.layer_selection_layout.setVerticalSpacing(2)
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFixedHeight(150)
+        self.scroll_area.setMinimumHeight(80)
+        self.scroll_area.setMaximumHeight(200)
         self.scroll_widget = QWidget()
         self.scroll_widget.setLayout(self.layer_selection_layout)
         self.scroll_area.setWidget(self.scroll_widget)
-        self.layer_selection_box.setLayout(QVBoxLayout())
         self.select_all_checkbox = QCheckBox("Select All")
         self.select_all_checkbox.setEnabled(False)
         self.select_all_checkbox.stateChanged.connect(self.toggle_select_all)
-        self.layer_selection_box.layout().addWidget(self.select_all_checkbox)
-        self.layer_selection_box.layout().addWidget(self.scroll_area)
+        layer_box_layout.addWidget(self.select_all_checkbox)
+        layer_box_layout.addWidget(self.scroll_area)
+        self.layer_selection_box.setLayout(layer_box_layout)
         main_layout.addWidget(self.layer_selection_box)
 
-        # Processing buttons (100% width)
         button_layout = QHBoxLayout()
         button_box = QGroupBox("Processing Options")
         button_box.setLayout(button_layout)
@@ -134,48 +139,197 @@ class ProcessGDBDialog(QDialog):
         self.run_all_button.setEnabled(False)
         self.run_all_button.clicked.connect(self.run_all_checks)
         button_layout.addWidget(self.run_all_button)
+        button_layout.addStretch()
         main_layout.addWidget(button_box)
 
-        # Log section (100% width)
-        log_vbox = QVBoxLayout()
-        # Clear Log button (100% width)
+        content_scroll = QScrollArea()
+        content_scroll.setWidgetResizable(True)
+        content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content_scroll.setWidget(content_widget)
+
+        log_box = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_box)
         clear_log_hbox = QHBoxLayout()
         self.clear_log_button = QPushButton("Clear Log")
         self.clear_log_button.clicked.connect(self.clear_log)
         clear_log_hbox.addStretch()
         clear_log_hbox.addWidget(self.clear_log_button)
-        clear_log_hbox.addStretch()
-        log_vbox.addLayout(clear_log_hbox)
-        # Log widget (100% width)
+        log_layout.addLayout(clear_log_hbox)
         self.log_textedit = QTextEdit()
         self.log_textedit.setReadOnly(True)
-        log_vbox.addWidget(self.log_textedit)
-        main_layout.addLayout(log_vbox)
+        self.log_textedit.setFixedHeight(80)
+        self.log_textedit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        log_layout.addWidget(self.log_textedit)
 
-        # Progress bar and label (100% width)
         self.progress_label = QLabel("Progress: Idle")
-        main_layout.addWidget(self.progress_label)
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
-        main_layout.addWidget(self.progress_bar)
         self.progress_bar.hide()
         self.progress_label.hide()
 
-        # PDF and folder links (100% width)
         self.pdf_link_label = QLabel("PDF Report: <a href='#'>Open Report</a>")
         self.pdf_link_label.setOpenExternalLinks(True)
         self.pdf_link_label.setStyleSheet("color: blue; text-decoration: underline;")
+        self.pdf_link_label.setWordWrap(True)
         self.pdf_link_label.hide()
-        main_layout.addWidget(self.pdf_link_label)
+
         self.folder_link_label = QLabel("Open Folder: <a href='#'>Open Output Folder</a>")
         self.folder_link_label.setOpenExternalLinks(True)
         self.folder_link_label.setStyleSheet("color: blue; text-decoration: underline;")
+        self.folder_link_label.setWordWrap(True)
         self.folder_link_label.hide()
-        main_layout.addWidget(self.folder_link_label)
 
-        self.setLayout(main_layout)
+        work_panel = QWidget()
+        work_layout = QVBoxLayout(work_panel)
+        work_layout.setContentsMargins(0, 0, 0, 0)
+        work_layout.setSpacing(6)
+
+        work_layout.addWidget(content_scroll, 1)
+        work_layout.addWidget(log_box, 0)
+        work_layout.addWidget(self.progress_label)
+        work_layout.addWidget(self.progress_bar)
+        work_layout.addWidget(self.pdf_link_label)
+        work_layout.addWidget(self.folder_link_label)
+
+        self.help_box = QGroupBox()
+        self.help_box.setFlat(True)
+        help_layout = QVBoxLayout(self.help_box)
+        help_layout.setContentsMargins(2, 2, 2, 2)
+        help_layout.setSpacing(0)
+        self.help_browser = QTextBrowser()
+        self.help_browser.setOpenExternalLinks(False)
+        self.help_browser.setHtml(self._help_html())
+        self.help_browser.anchorClicked.connect(self._on_help_link_clicked)
+        self.help_browser.setMinimumWidth(220)
+        self.help_browser.setMaximumWidth(300)
+        help_layout.addWidget(self.help_browser)
+
+        self._saved_help_width = 260
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.addWidget(work_panel)
+        self.splitter.addWidget(self.help_box)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setCollapsible(1, True)
+        self.splitter.setSizes([9999, 0])
+        self.splitter.splitterMoved.connect(self._on_help_splitter_moved)
+
+        outer_layout = QHBoxLayout(self)
+        outer_layout.setContentsMargins(6, 6, 6, 6)
+        outer_layout.addWidget(self.splitter)
+
+        self.toggle_help_button = QPushButton("« Show Help")
+        self.toggle_help_button.setToolTip("Show or hide the help panel")
+        self.toggle_help_button.clicked.connect(self._toggle_help_panel)
+        button_layout.addWidget(self.toggle_help_button)
+
+    def _toggle_help_panel(self):
+        sizes = self.splitter.sizes()
+        if sizes[1] > 0:
+            self._saved_help_width = max(sizes[1], 220)
+            self.splitter.setSizes([sum(sizes), 0])
+        else:
+            total = sum(sizes)
+            help_width = self._saved_help_width
+            self.splitter.setSizes([max(1, total - help_width), help_width])
+        self._update_help_toggle_label()
+
+    def _on_help_splitter_moved(self, _pos, _index):
+        self._update_help_toggle_label()
+
+    def _update_help_toggle_label(self):
+        if self.splitter.sizes()[1] > 0:
+            self.toggle_help_button.setText("Hide Help »")
+        else:
+            self.toggle_help_button.setText("« Show Help")
+
+    def _dictionary_source_path(self):
+        return os.path.join(os.path.dirname(__file__), "dictionary.xlsx")
+
+    def _on_help_link_clicked(self, url):
+        if url.scheme() == "download" and url.host() == "dictionary":
+            self._download_dictionary()
+            return
+        QDesktopServices.openUrl(url)
+
+    def _download_dictionary(self):
+        source = self._dictionary_source_path()
+        default_path = os.path.join(os.path.expanduser("~"), "Downloads", "dictionary.xlsx")
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save dictionary.xlsx",
+            default_path,
+            "Excel Files (*.xlsx)",
+        )
+        if not save_path:
+            return
+
+        try:
+            if os.path.exists(source):
+                shutil.copy2(source, save_path)
+            else:
+                import requests
+                remote_url = "https://raw.githubusercontent.com/fnmutua/connector-for-ODK/main/dictionary.xlsx"
+                response = requests.get(remote_url, timeout=30)
+                response.raise_for_status()
+                with open(save_path, "wb") as outfile:
+                    outfile.write(response.content)
+            QMessageBox.information(self, "Download complete", f"dictionary.xlsx saved to:\n{save_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Download failed", f"Could not save dictionary.xlsx:\n{e}")
+
+    def _help_html(self):
+        return """
+        <h3>QA/QC Tool</h3>
+        <p>Run quality checks on ESRI File Geodatabase layers and export issue layers, spreadsheets, and a PDF summary.</p>
+
+        <h4>Quick start</h4>
+        <ol>
+            <li><b>Select GeoDatabase</b> &mdash; choose the folder containing your <code>.gdb</code>.</li>
+            <li><b>Select Output Folder</b> &mdash; where reports and issue layers are written (existing files are overwritten).</li>
+            <li><b>Set parameters</b> &mdash; adjust angle and length thresholds if needed.</li>
+            <li><b>Select layers</b> &mdash; tick the layers to check, or use <b>Select All</b>.</li>
+            <li>Click <b>Run All Checks</b>.</li>
+        </ol>
+
+        <h4>Checks performed</h4>
+        <ul>
+            <li><b>Duplicate geometries</b> &mdash; features with identical geometry.</li>
+            <li><b>Duplicate attributes</b> &mdash; rows with identical non-geometry fields.</li>
+            <li><b>Overlapping polygons</b> &mdash; polygon pairs sharing area above 0.01&nbsp;m&sup2; (uses EPSG:21037).</li>
+            <li><b>Line issues</b> &mdash; sharp turns within the min/max angle range, and self-intersections.</li>
+            <li><b>Short lines</b> &mdash; line features shorter than the minimum length (uses EPSG:21037).</li>
+            <li><b>Attribute issues</b> &mdash; validates fields against the bundled <code>dictionary.xlsx</code> (fuzzy sheet name match).</li>
+        </ul>
+
+        <h4>Parameters</h4>
+        <ul>
+            <li><b>Min / Max Angle</b> &mdash; flag vertices where the turn angle falls inside this range (default 1&deg;&ndash;45&deg;).</li>
+            <li><b>Min Length (m)</b> &mdash; flag linear features shorter than this value (default 10&nbsp;m).</li>
+        </ul>
+
+        <h4>Attribute dictionary</h4>
+        <p><code>dictionary.xlsx</code> is installed with the plugin. Each sheet should match a layer name and include columns <code>Attribute</code>, <code>Type</code>, and optionally <code>LEN</code> and <code>Options</code>.</p>
+        <p><a href="download://dictionary">Download dictionary.xlsx</a></p>
+
+        <h4>Outputs</h4>
+        <p>For each layer and issue type, a <code>.gpkg</code> and <code>.xlsx</code> are saved. A summary PDF (<code>database_summary_report.pdf</code>) is written to the output folder. Use the links below the log when processing finishes.</p>
+        """
+
+    def _resize_to_available_screen(self):
+        """Open at a comfortable size without exceeding the available screen."""
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(780, 560)
+            return
+
+        available = screen.availableGeometry()
+        width = max(self.minimumWidth(), min(860, int(available.width() * 0.9)))
+        height = max(self.minimumHeight(), min(720, int(available.height() * 0.88)))
+        self.resize(width, height)
 
     def clear_log(self):
         """Clear the log widget content."""
@@ -183,6 +337,20 @@ class ProcessGDBDialog(QDialog):
 
     def log_message(self, message):
         self.log_textedit.append(message)
+
+    def _write_gpkg(self, gdf, filepath):
+        """Write a GeoPackage, replacing any existing file or layer."""
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        gdf.to_file(filepath, driver="GPKG", mode="w")
+
+    def _write_excel(self, filepath, sheets):
+        """Write Excel output, replacing any existing file."""
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        with pd.ExcelWriter(filepath, engine="xlsxwriter", mode="w") as writer:
+            for sheet_name, dataframe in sheets.items():
+                dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
 
     def select_gdb(self):
         gdb_path = QFileDialog.getExistingDirectory(self, "Select GeoDatabase Folder")
@@ -219,13 +387,18 @@ class ProcessGDBDialog(QDialog):
             if widget is not None:
                 widget.deleteLater()
         self.layer_checkboxes = []
+        columns = 1 if self.width() < 640 else 2
         for i, layer in enumerate(self.layers):
             checkbox = QCheckBox(layer)
             self.layer_checkboxes.append(checkbox)
-            row = i // 2
-            col = i % 2
+            row = i // columns
+            col = i % columns
             self.layer_selection_layout.addWidget(checkbox, row, col)
-        self.scroll_area.setFixedHeight(150)
+
+        rows = max(1, (len(self.layers) + columns - 1) // columns)
+        layer_list_height = min(200, max(80, rows * 28 + 12))
+        self.scroll_area.setMinimumHeight(layer_list_height)
+        self.scroll_area.setMaximumHeight(layer_list_height)
 
     def validate_geodataframe(self, gdf):
         if "geometry" in gdf.columns and gdf.geometry.name != "geometry":
@@ -556,7 +729,7 @@ class ProcessGDBDialog(QDialog):
                     }
                     if duplicate_geoms is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_duplicate_geometries.gpkg")
-                        duplicate_geoms.to_file(issue_file, driver="GPKG")
+                        self._write_gpkg(duplicate_geoms, issue_file)
                         print(f"  - Duplicate geometries saved to {issue_file}")
                         if duplicate_pairs:
                             duplicate_pairs_df = pd.DataFrame(duplicate_pairs, columns=["Feature1", "Feature2"])
@@ -564,29 +737,31 @@ class ProcessGDBDialog(QDialog):
                             duplicate_pairs_df = duplicate_pairs_df.drop_duplicates()
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
                             excel_file = os.path.join(self.output_folder, f"{layer}_duplicates.xlsx")
-                            with pd.ExcelWriter(excel_file,engine="xlsxwriter") as writer:
-                                duplicate_pairs_df.to_excel(writer, sheet_name="Duplicate Pairs", index=False)
-                                all_features_df.to_excel(writer, sheet_name="All Features", index=False)
+                            self._write_excel(excel_file, {
+                                "Duplicate Pairs": duplicate_pairs_df,
+                                "All Features": all_features_df,
+                            })
                             print(f"  - Unique duplicate pairs and all features saved to {excel_file}")
                     if duplicate_attrs is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_duplicate_attributes.gpkg")
-                        duplicate_attrs.to_file(issue_file, driver="GPKG")
+                        self._write_gpkg(duplicate_attrs, issue_file)
                         print(f"  - Duplicate attributes saved to {issue_file}")
                     if overlapping_polys is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_overlapping_polygons.gpkg")
-                        overlapping_polys.to_file(issue_file, driver="GPKG")
+                        self._write_gpkg(overlapping_polys, issue_file)
                         print(f"  - Overlapping polygons saved to {issue_file}")
                         if overlap_pairs:
                             overlap_pairs_df = pd.DataFrame(overlap_pairs, columns=["Feature1", "Feature2", "Overlap Area (m²)"])
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
                             excel_file = os.path.join(self.output_folder, f"{layer}_overlaps.xlsx")
-                            with pd.ExcelWriter(excel_file,engine="xlsxwriter") as writer:
-                                overlap_pairs_df.to_excel(writer, sheet_name="Overlap Pairs", index=False)
-                                all_features_df.to_excel(writer, sheet_name="All Features", index=False)
+                            self._write_excel(excel_file, {
+                                "Overlap Pairs": overlap_pairs_df,
+                                "All Features": all_features_df,
+                            })
                             print(f"  - Overlapping pairs and all features saved to {excel_file}")
                     if line_issues is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_line_issues.gpkg")
-                        line_issues.to_file(issue_file, driver="GPKG")
+                        self._write_gpkg(line_issues, issue_file)
                         print(f"  - Line issues saved to {issue_file}")
                         if line_issue_details:
                             line_issue_details_df = pd.DataFrame(line_issue_details, columns=["FeatureIndex", "IssueType", "Angle", "x", "y"])
@@ -594,25 +769,27 @@ class ProcessGDBDialog(QDialog):
                             line_issue_details_df = line_issue_details_df[["feature_id", "FeatureIndex", "IssueType", "Angle", "x", "y"]]
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
                             excel_file = os.path.join(self.output_folder, f"{layer}_line_issues.xlsx")
-                            with pd.ExcelWriter(excel_file,engine="xlsxwriter") as writer:
-                                line_issue_details_df.to_excel(writer, sheet_name="Line Issues", index=False)
-                                all_features_df.to_excel(writer, sheet_name="All Features", index=False)
+                            self._write_excel(excel_file, {
+                                "Line Issues": line_issue_details_df,
+                                "All Features": all_features_df,
+                            })
                             print(f"  - Line issues and all features saved to {excel_file}")
                     if short_lines is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_short_lines.gpkg")
-                        short_lines.to_file(issue_file, driver="GPKG")
+                        self._write_gpkg(short_lines, issue_file)
                         print(f"  - Short linear features saved to {issue_file}")
                         if short_line_details:
                             short_line_details_df = pd.DataFrame(short_line_details, columns=["FeatureID", "Length (m)"])
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
                             excel_file = os.path.join(self.output_folder, f"{layer}_short_lines.xlsx")
-                            with pd.ExcelWriter(excel_file,engine="xlsxwriter") as writer:
-                                short_line_details_df.to_excel(writer, sheet_name="Short Lines", index=False)
-                                all_features_df.to_excel(writer, sheet_name="All Features", index=False)
+                            self._write_excel(excel_file, {
+                                "Short Lines": short_line_details_df,
+                                "All Features": all_features_df,
+                            })
                             print(f"  - Short linear features and all features saved to {excel_file}")
                     if attribute_issues is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_attribute_issues.gpkg")
-                        attribute_issues.to_file(issue_file, driver="GPKG")
+                        self._write_gpkg(attribute_issues, issue_file)
                         print(f"  - Attribute issues saved to {issue_file}")
                         if attribute_issue_details:
                             attribute_issue_details_df = pd.DataFrame(
@@ -625,9 +802,10 @@ class ProcessGDBDialog(QDialog):
                             attribute_issue_details_df = attribute_issue_details_df[["feature_id", "FeatureIndex", "IssueType", "Description", "x", "y"]]
                             all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
                             excel_file = os.path.join(self.output_folder, f"{layer}_attribute_issues.xlsx")
-                            with pd.ExcelWriter(excel_file,engine="xlsxwriter") as writer:
-                                attribute_issue_details_df.to_excel(writer, sheet_name="Attribute Issues", index=False)
-                                all_features_df.to_excel(writer, sheet_name="All Features", index=False)
+                            self._write_excel(excel_file, {
+                                "Attribute Issues": attribute_issue_details_df,
+                                "All Features": all_features_df,
+                            })
                             print(f"  - Attribute issues and all features saved to {excel_file}")
             self.generate_summary_pdf(self.output_folder, layer_summary, total_layers, total_features, unmatched_layers)
             self.progress_bar.hide()
