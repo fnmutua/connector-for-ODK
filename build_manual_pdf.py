@@ -113,13 +113,25 @@ class ManualPDF(FPDF):
         self.set_x(MARGIN)
 
     def code_block(self, text):
-        self.ensure_space(12)
-        self.set_fill_color(248, 248, 248)
+        text = clean(text)
+        if not text:
+            return
+        pad = 3
+        line_h = 4.8
         self.set_font("Courier", "", 8)
-        self.set_x(MARGIN)
-        self.multi_cell(CONTENT_W, 5, clean(text), fill=True)
-        self.ln(3)
-        self.set_x(MARGIN)
+        lines = self.multi_cell(CONTENT_W - pad * 2, line_h, text, dry_run=True, output="LINES")
+        box_h = max(line_h, len(lines) * line_h) + pad * 2
+        self.ensure_space(box_h + 4)
+        y0 = self.get_y()
+        self.set_fill_color(248, 250, 252)
+        self.set_draw_color(25, 73, 120)
+        self.set_line_width(0.4)
+        self.rect(MARGIN, y0, CONTENT_W, box_h, style="DF")
+        self.set_xy(MARGIN + pad, y0 + pad)
+        self.set_font("Courier", "", 8)
+        self.set_text_color(35, 35, 35)
+        self.multi_cell(CONTENT_W - pad * 2, line_h, "\n".join(lines))
+        self.set_y(y0 + box_h + 3)
 
     def table(self, rows):
         if not rows:
@@ -233,18 +245,18 @@ def build():
         if line == "## Screenshot checklist":
             break
 
-        if in_code:
-            if line.endswith("```"):
-                pdf.code_block(" ".join(code_buf))
+        if line.startswith("```"):
+            if in_code:
+                pdf.code_block("\n".join(code_buf))
                 code_buf = []
                 in_code = False
             else:
-                code_buf.append(line.lstrip("> ").strip())
+                in_code = True
             i += 1
             continue
 
-        if line.startswith("> ```"):
-            in_code = True
+        if in_code:
+            code_buf.append(line)
             i += 1
             continue
 

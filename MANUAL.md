@@ -36,35 +36,46 @@ Each dialog includes a collapsible **Help** panel. Click **« Show Help** to ope
 
 ### 2.2 Python packages
 
-The plugin installs missing packages automatically the first time it loads. Required packages:
+The plugin installs missing packages automatically the first time it loads. If that fails, install dependencies manually using **OSGeo4W Shell** from your QGIS installation (Windows).
+
+**Open OSGeo4W Shell**
+
+1. Close QGIS.
+2. Open **OSGeo4W Shell** from your QGIS installation folder — for example `C:\Program Files\QGIS 3.x\bin\OSGeo4W.bat` — or from the Windows Start menu under your QGIS install (e.g. **QGIS Desktop → OSGeo4W Shell**).
+
+> Use the OSGeo4W Shell that ships with the same QGIS version you use. Do not use a separate OSGeo4W install, or packages may install into the wrong Python environment.
+
+**Install required packages**
+
+Run this command in that shell:
+
+```
+python -m pip install numpy pandas geopandas fiona shapely pyproj fpdf2 requests fuzzywuzzy rapidfuzz shortuuid openpyxl xlsxwriter
+```
+
+Required packages:
 
 
-| Package | Used for |
-| ------- | -------- |
-| `numpy` | Numerical processing |
-| `pandas` | Tables and spreadsheets |
-| `geopandas` | Spatial data handling |
-| `fiona` | Reading/writing geospatial files |
-| `shapely` | Geometry operations |
-| `pyproj` | Coordinate reference systems |
-| `fpdf2` | QA/QC PDF reports (`import fpdf`) |
-| `requests` | ODK Central and KeSMIS API calls |
+| Package      | Used for                           |
+| ------------ | ---------------------------------- |
+| `numpy`      | Numerical processing               |
+| `pandas`     | Tables and spreadsheets            |
+| `geopandas`  | Spatial data handling              |
+| `fiona`      | Reading/writing geospatial files   |
+| `shapely`    | Geometry operations                |
+| `pyproj`     | Coordinate reference systems       |
+| `fpdf2`      | QA/QC PDF reports (`import fpdf`)  |
+| `requests`   | ODK Central and KeSMIS API calls   |
 | `fuzzywuzzy` | Fuzzy field and attribute matching |
-| `rapidfuzz` | Fast field matching (Import) |
-| `shortuuid` | Unique ID generation (Import) |
-| `openpyxl` | Reading `dictionary.xlsx` (QA/QC) |
-| `xlsxwriter` | Writing QA/QC Excel outputs |
+| `rapidfuzz`  | Fast field matching (Import)       |
+| `shortuuid`  | Unique ID generation (Import)      |
+| `openpyxl`   | Reading `dictionary.xlsx` (QA/QC)  |
+| `xlsxwriter` | Writing QA/QC Excel outputs        |
 
 
-> **Tip:** QGIS ships with many geospatial libraries. If automatic installation fails, open **OSGeo4W Shell** (Windows) or your QGIS Python environment and run:
->
-> ```
-> python -m pip install numpy pandas geopandas fiona shapely pyproj fpdf2 requests fuzzywuzzy rapidfuzz shortuuid openpyxl xlsxwriter
-> ```
+![Manual package installation in OSGeo4W Shell](screenshots/figure2.png)
 
-![Manual package installation](screenshots/figure2.png)
-
-*Figure 2 — Manual installation of Python packages (OSGeo4W Shell or QGIS Python console)*
+*Figure 2 — Installing Python packages in OSGeo4W Shell from your QGIS installation folder*
 
 ### 2.3 Data and access
 
@@ -158,10 +169,6 @@ Download ODK form submissions and add them to your map.
 
 Create separate in-memory layers for each unique value in a chosen attribute field.
 
-![Split Layer dialog](screenshots/figure15.png)
-
-*Figure 15 — Split Layer dialog*
-
 ### Steps
 
 1. Load the source vector layer in QGIS.
@@ -170,9 +177,13 @@ Create separate in-memory layers for each unique value in a chosen attribute fie
 4. Choose the **Field** to split on.
 5. Click **Split Layer**.
 
+![Split Layer dialog](screenshots/figure15.png)
+
+*Figure 10 — Split Layer dialog*
+
 ### Result
 
-See **Figure 15** for the Split Layer dialog. After splitting:
+After splitting:
 
 - One new layer is created per unique non-null value.
 - Layers are named `{layer}_{value}`.
@@ -197,7 +208,7 @@ Run quality checks on File Geodatabase layers and export issue layers, spreadshe
 
 ![QA/QC interface](screenshots/figure12a.png)
 
-*Figure 12a — QA/QC interface*
+*Figure 11 — QA/QC interface*
 
 ### Checks performed
 
@@ -224,7 +235,7 @@ Run quality checks on File Geodatabase layers and export issue layers, spreadshe
 
 ![QA/QC completed run](screenshots/figure12b.png)
 
-*Figure 12b — Completed run with report and output folder links*
+*Figure 12 — Completed run with report and output folder links*
 
 ### Attribute dictionary
 
@@ -250,30 +261,22 @@ Upload QGIS vector layer features to a KeSMIS server with automatic field mappin
 
 ![Import dialog](screenshots/figure10.png)
 
-*Figure 10 — Import dialog with layer, entity, and field mapping*
+*Figure 15 — Import dialog with layer, entity, and field mapping*
 
 ### Steps
 
-1. Load your vector layer(s) in QGIS first.
-2. Open **Plugins → Connector for ODK → Import**.
-3. **Server Login** — enter the KeSMIS URL, username, and password, then click **Login**.
-4. **Select Layer** — choose the QGIS vector layer to export.
-5. **Select Parent Entity** — choose `settlement` or `ward` for spatial matching.
-6. **Select Entity** — choose the API entity/model to submit to.
-7. Review the **Field Mapping** table (see Figure 10). Use the filter box to search fields and adjust API field selections if needed.
-8. Click **Submit Data to KeSMIS**.
-
-### Code column
-
-Layers should include a `code` column for pcode matching.
-
-1. Click **Populate Code in Selected Layers**.
-2. Tick the layers to update and click **Run**.
-3. A message will confirm success or report any skipped layers. Details appear in the log.
+1. **Populate code in loaded layers** — Load your vector layer(s) in QGIS, open **Plugins → Connector for ODK → Import**, click **Populate Code in Selected Layers**, tick the layers to update, and click **Run**. A message confirms success or reports any skipped layers (see Figure 16). Layers need a `code` column for pcode matching.
 
 ![Populate Code dialog](screenshots/figure11.png)
 
-*Figure 11 — Layer selection dialog for Populate Code*
+*Figure 16 — Layer selection dialog for Populate Code*
+
+2. **Server Login** — enter the KeSMIS URL, username, and password, then click **Login**.
+3. **Select Layer** — choose the QGIS vector layer to export.
+4. **Select Parent Entity** — choose `settlement` or `ward` for spatial matching.
+5. **Select Entity** — choose the API entity/model to submit to.
+6. Review the **Field Mapping** table (see Figure 15). Use the filter box to search fields and adjust API field selections if needed.
+7. Click **Submit Data to KeSMIS**.
 
 ### Dry run
 
@@ -287,7 +290,7 @@ Enable **Dry Run (Test Mode)** to submit only a limited number of records before
 | Issue                                | What to try                                                                                                 |
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
 | Plugin does not appear after install | Restart QGIS. Check **Plugins → Manage and Install Plugins → Installed** that Connector for ODK is enabled. |
-| Package install fails                | Install dependencies manually using the QGIS Python environment (see Section 2.2).                          |
+| Package install fails                | Close QGIS. Open **OSGeo4W Shell** from your QGIS installation folder, then install packages as shown in Section 2.2. |
 | ODK / KeSMIS login fails             | Confirm URL, username, and password. Check network access to the server.                                    |
 | Import missing `code` field          | Use **Populate Code in Selected Layers** before submitting.                                                 |
 | QA/QC attribute check skipped        | Ensure `dictionary.xlsx` has a sheet matching the layer name.                                               |
@@ -304,24 +307,24 @@ For updates, bug reports, and source code:
 ## Screenshot checklist
 
 
-| File | What to capture |
-| ------------------------------ | --------------------------------------------- |
-| `figure1.png` | QGIS toolbar + Plugins menu |
-| `figure2.png` | OSGeo4W Shell or pip install command |
-| `figure3.png` | Plugin Manager search |
-| `figure4.png` | Install from ZIP tab |
-| `figure5.png` | Connector for ODK submenu |
-| `figrue6-getdata.png` | Get Data — login screen |
-| `figure7.png` | Get Data — project/form selected |
-| `figure8.png` | Map with submissions layer |
-| `figure9.png` | Get Data help panel |
-| `figure15.png` | Split Layer dialog |
-| `figure12a.png` | QA/QC — interface |
-| `figure12b.png` | QA/QC — finished |
-| `figure13.png` | QA/QC help + dictionary link |
-| `figure14.png` | Output folder contents |
-| `figure10.png` | Import — main dialog (includes field mapping) |
-| `figure11.png` | Populate Code layer picker |
+| Figure | File                  | What to capture                               |
+| ------ | --------------------- | --------------------------------------------- |
+| 1      | `figure1.png`         | QGIS toolbar + Plugins menu                   |
+| 2      | `figure2.png`         | OSGeo4W Shell pip install (from QGIS install folder) |
+| 3      | `figure3.png`         | Plugin Manager search                         |
+| 4      | `figure4.png`         | Install from ZIP tab                          |
+| 5      | `figure5.png`         | Connector for ODK submenu                     |
+| 6      | `figrue6-getdata.png` | Get Data — login screen                       |
+| 7      | `figure7.png`         | Get Data — project/form selected              |
+| 8      | `figure8.png`         | Map with submissions layer                    |
+| 9      | `figure9.png`         | Get Data help panel                           |
+| 10     | `figure15.png`        | Split Layer dialog                            |
+| 11     | `figure12a.png`       | QA/QC — interface                             |
+| 12     | `figure12b.png`       | QA/QC — finished                              |
+| 13     | `figure13.png`        | QA/QC help + dictionary link                  |
+| 14     | `figure14.png`        | Output folder contents                        |
+| 15     | `figure10.png`        | Import — main dialog (includes field mapping) |
+| 16     | `figure11.png`        | Populate Code layer picker                    |
 
 
 ---
