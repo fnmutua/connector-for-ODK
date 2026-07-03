@@ -39,21 +39,27 @@ Each dialog includes a collapsible **Help** panel. Click **« Show Help** to ope
 The plugin installs missing packages automatically the first time it loads. Required packages:
 
 
-| Package     | Used for                         |
-| ----------- | -------------------------------- |
-| `numpy`     | Data processing                  |
-| `pandas`    | Tables and spreadsheets          |
-| `geopandas` | Spatial data handling            |
-| `fiona`     | Reading/writing geospatial files |
-| `shapely`   | Geometry operations              |
-| `fpdf`      | QA/QC PDF reports                |
-| `pyproj`    | Coordinate reference systems     |
+| Package | Used for |
+| ------- | -------- |
+| `numpy` | Numerical processing |
+| `pandas` | Tables and spreadsheets |
+| `geopandas` | Spatial data handling |
+| `fiona` | Reading/writing geospatial files |
+| `shapely` | Geometry operations |
+| `pyproj` | Coordinate reference systems |
+| `fpdf2` | QA/QC PDF reports (`import fpdf`) |
+| `requests` | ODK Central and KeSMIS API calls |
+| `fuzzywuzzy` | Fuzzy field and attribute matching |
+| `rapidfuzz` | Fast field matching (Import) |
+| `shortuuid` | Unique ID generation (Import) |
+| `openpyxl` | Reading `dictionary.xlsx` (QA/QC) |
+| `xlsxwriter` | Writing QA/QC Excel outputs |
 
 
 > **Tip:** QGIS ships with many geospatial libraries. If automatic installation fails, open **OSGeo4W Shell** (Windows) or your QGIS Python environment and run:
 >
 > ```
-> python -m pip install numpy pandas geopandas fiona shapely fpdf pyproj
+> python -m pip install numpy pandas geopandas fiona shapely pyproj fpdf2 requests fuzzywuzzy rapidfuzz shortuuid openpyxl xlsxwriter
 > ```
 
 ![Manual package installation](screenshots/figure2.png)

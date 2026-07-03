@@ -80,20 +80,21 @@ class ConnectODK:
             packages (list): A list of package names to check and install.
         """
         for package in packages:
+            import_name, install_name = package if isinstance(package, tuple) else (package, package)
             try:
-                __import__(package)  # Try importing the package
+                __import__(import_name)  # Try importing the package
                 #self.log_message(f"{package} is already installed.")
             except ImportError:
-                QMessageBox.information(None, "Installing Dependencies", f"Installing {package}, please wait...")
-                self.log_message(f"{package} not found. Installing...")
+                QMessageBox.information(None, "Installing Dependencies", f"Installing {install_name}, please wait...")
+                self.log_message(f"{import_name} not found. Installing {install_name}...")
 
                 try:
                     # Install the package using pip
-                    subprocess.run([sys.executable, "-m", "pip", "install", package], check=True)
-                    self.log_message(f"{package} is now installed.")
+                    subprocess.run([sys.executable, "-m", "pip", "install", install_name], check=True)
+                    self.log_message(f"{import_name} is now installed.")
                 except Exception as e:
-                    QMessageBox.critical(None, "Installation Failed", f"Error installing {package}: {e}")
-                    self.log_message(f"Failed to install {package}: {e}")
+                    QMessageBox.critical(None, "Installation Failed", f"Error installing {install_name}: {e}")
+                    self.log_message(f"Failed to install {install_name}: {e}")
 
     def log_message(self, message):
         """Logs messages to the QGIS Python console."""
@@ -103,7 +104,11 @@ class ConnectODK:
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
-        required_packages = ["fpdf", "geopandas", "numpy", "pandas", "shapely","fiona"]
+        required_packages = [
+            "numpy", "pandas", "geopandas", "fiona", "shapely", "pyproj",
+            ("fpdf", "fpdf2"), "requests", "fuzzywuzzy", "rapidfuzz", "shortuuid",
+            "openpyxl", "xlsxwriter",
+        ]
         self.ensure_packages_installed(required_packages)
 
         # First, check if actions already exist and remove them if they do
