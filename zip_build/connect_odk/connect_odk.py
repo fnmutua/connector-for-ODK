@@ -57,19 +57,19 @@ class ConnectODK:
 
     def open_split_layer_dialog(self):
             """Open the Split Layer dialog."""
-            dialog = SplitLayerDialog()  # Create the SplitLayerDialog
-            dialog.exec_()  # Open the dialog
+            dialog = SplitLayerDialog(self.iface.mainWindow())
+            dialog.exec_()
 
     def open_qaqc_dialog(self):
             """Open the QA/QC dialog."""
-            dialog = ProcessGDBDialog()  # Create the ProcessGDBDialog
-            dialog.exec_()  # Open the dialog
+            dialog = ProcessGDBDialog(self.iface.mainWindow())
+            dialog.exec_()
 
 
     def open_kesmis_dialog(self):
             """Open the Import dialog."""
-            dialog = KesMISDialog()  # Create the ProcessGDBDialog
-            dialog.exec_()  # Open the dialog
+            dialog = KesMISDialog(self.iface.mainWindow())
+            dialog.exec_()
 
 
     def ensure_packages_installed(self, packages):
@@ -85,7 +85,7 @@ class ConnectODK:
                 __import__(import_name)  # Try importing the package
                 #self.log_message(f"{package} is already installed.")
             except ImportError:
-                QMessageBox.information(None, "Installing Dependencies", f"Installing {install_name}, please wait...")
+                QMessageBox.information(self.iface.mainWindow(), "Installing Dependencies", f"Installing {install_name}, please wait...")
                 self.log_message(f"{import_name} not found. Installing {install_name}...")
 
                 try:
@@ -93,7 +93,7 @@ class ConnectODK:
                     subprocess.run([sys.executable, "-m", "pip", "install", install_name], check=True)
                     self.log_message(f"{import_name} is now installed.")
                 except Exception as e:
-                    QMessageBox.critical(None, "Installation Failed", f"Error installing {install_name}: {e}")
+                    QMessageBox.critical(self.iface.mainWindow(), "Installation Failed", f"Error installing {install_name}: {e}")
                     self.log_message(f"Failed to install {install_name}: {e}")
 
     def log_message(self, message):
@@ -155,7 +155,7 @@ class ConnectODK:
         """Run method that performs all the real work."""
         if self.first_start:
             self.first_start = False
-            self.dlg = ConnectODKDialog()  # Create the main dialog
+            self.dlg = ConnectODKDialog(parent=self.iface.mainWindow())
 
         # Get the form data from the main dialog
         result = self.dlg.exec_()

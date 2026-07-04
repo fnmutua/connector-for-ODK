@@ -21,6 +21,13 @@ def is_parent_boundary_layer(layer_name):
     return layer_name.strip().endswith(" Boundaries")
 
 
+def is_settlement_data_layer(layer_name):
+    """Detect user data layers whose name indicates settlements (not boundary reference layers)."""
+    if is_parent_boundary_layer(layer_name):
+        return False
+    return "settlement" in layer_name.lower()
+
+
 def describe_edit_blockers(layer):
     """Return provider details and missing capabilities for clearer logs."""
     provider = layer.dataProvider()
@@ -96,6 +103,13 @@ def process_layer(layer, log=None):
 
     if is_parent_boundary_layer(layer.name()):
         log(f"Skipping parent boundary layer: {layer.name()}")
+        return False
+
+    if is_settlement_data_layer(layer.name()):
+        log(
+            f"Skipping settlement layer: {layer.name()}. "
+            "Use Sync Settlement Codes from KeSMIS instead of generating UUID codes."
+        )
         return False
 
     log(f"Processing layer: {layer.name()}")

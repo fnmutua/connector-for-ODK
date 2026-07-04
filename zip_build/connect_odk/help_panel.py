@@ -6,6 +6,30 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QGuiApplication, QDesktopServices
 
 
+def plugin_dialog_parent():
+    """Return the QGIS main window so dialogs stay scoped to QGIS."""
+    try:
+        from qgis.utils import iface
+        if iface is not None:
+            return iface.mainWindow()
+    except Exception:
+        pass
+    return None
+
+
+def configure_qgis_dialog(dialog, parent=None):
+    """Keep plugin dialogs modal over QGIS only, not over other applications."""
+    if parent is None:
+        parent = plugin_dialog_parent()
+    if parent is not None:
+        dialog.setParent(parent)
+    dialog.setWindowModality(Qt.WindowModal)
+    dialog.setWindowFlags(
+        Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
+    )
+    return dialog
+
+
 def resize_dialog_to_screen(dialog, min_width=480, min_height=420, max_width=860, max_height=720):
     dialog.setMinimumSize(min_width, min_height)
     screen = QGuiApplication.primaryScreen()

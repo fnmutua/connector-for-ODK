@@ -22,8 +22,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from rapidfuzz import process, fuzz
 
-from .help_panel import CollapsibleHelpMixin, resize_dialog_to_screen
-from .code_helper_qgis_console import process_layer
+from .help_panel import CollapsibleHelpMixin, resize_dialog_to_screen, configure_qgis_dialog
+from .code_helper_qgis_console import is_settlement_data_layer, process_layer
 
 def validate_and_repair_geometry(geom, tolerance=1e-8):
     """
@@ -134,47 +134,106 @@ class SearchableComboBox(QComboBox):
         super().__init__(parent)
         self.setEditable(True)
         self.setInsertPolicy(QComboBox.NoInsert)
-        self.setFocusPolicy(Qt.StrongFocus)  # Allow keyboard input
-        self.lineEdit().textEdited.connect(self.filter_items)
-        self.lineEdit().textChanged.connect(self.handle_text_changed)
-        self._all_items = []
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._source_items = []
+        self._item_data = {}
+        self._updating = False
+        self.lineEdit().textEdited.connect(self._on_text_edited)
+        self.lineEdit().textChanged.connect(self._on_text_changed)
         self.setMinimumWidth(200)
         self.setPlaceholderText("Search...")
 
     def addItems(self, items):
-        """Store all items for filtering, with '-' as the clear option."""
-        self._all_items = ["-"] + items
-        super().addItems(self._all_items)
+        """Store the full item list for filtering, with '-' as the clear option."""
+        self._source_items = list(items)
+        self._item_data = {}
+        self._populate_dropdown(filter_text="", selected_text="-")
 
-    def filter_items(self, text):
-        """Filter dropdown items based on user input in the combo box."""
+    def setItemData(self, index, value, role=Qt.UserRole):
+        """Persist item data by text so it survives dropdown rebuilds."""
+        text = self.itemText(index)
+        if text and text != "-":
+            self._item_data[text] = value
+        super().setItemData(index, value, role)
+
+    def _apply_item_data(self):
+        for i in range(self.count()):
+            text = self.itemText(i)
+            if text in self._item_data:
+                super().setItemData(i, self._item_data[text], Qt.UserRole)
+
+    def _populate_dropdown(self, filter_text="", selected_text=None):
+        if selected_text is None:
+            selected_text = self.lineEdit().text() if self.lineEdit() else ""
+
+        self._updating = True
+        line_edit = self.lineEdit()
+        if line_edit:
+            line_edit.blockSignals(True)
         self.blockSignals(True)
-        self.clear()
-        if not text:
-            self.addItems(self._all_items)
-        else:
-            filtered = [item for item in self._all_items if text.lower() in item.lower()]
-            self.addItems(filtered)
-        self.blockSignals(False)
-        if text:  # Only show popup if user is typing
-            self.showPopup()
 
-    def handle_text_changed(self, text):
-        """Ensure clearing text selects the '-' option."""
+        super().clear()
+
+        if not filter_text or filter_text == "-":
+            choices = ["-"] + list(self._source_items)
+        else:
+            needle = filter_text.lower()
+            matches = [item for item in self._source_items if needle in item.lower()]
+            if matches:
+                choices = ["-"] + matches
+            else:
+                choices = ["-", filter_text]
+
+        super().addItems(choices)
+        self._apply_item_data()
+
+        if selected_text and selected_text != "-":
+            idx = self.findText(selected_text)
+            if idx >= 0:
+                self.setCurrentIndex(idx)
+            else:
+                super().addItem(selected_text)
+                self.setCurrentIndex(self.count() - 1)
+            if line_edit:
+                line_edit.setText(selected_text)
+        else:
+            self.setCurrentIndex(0)
+            if line_edit:
+                line_edit.setText("")
+
+        if line_edit:
+            line_edit.blockSignals(False)
+        self.blockSignals(False)
+        self._updating = False
+
+    def _on_text_edited(self, text):
+        if self._updating:
+            return
         if not text:
-            self.setCurrentIndex(0)  # Select '-' reliably
+            self._populate_dropdown(filter_text="", selected_text="-")
+            return
+        self._populate_dropdown(filter_text=text, selected_text=text)
+        self.showPopup()
+
+    def _on_text_changed(self, text):
+        if self._updating:
+            return
+        if not text:
+            self._populate_dropdown(filter_text="", selected_text="-")
+
+    def showPopup(self):
+        """Open the dropdown with the full option list; current value stays selected."""
+        current = self.lineEdit().text().strip() if self.lineEdit() else self.currentText().strip()
+        selected = current if current and current != "-" else "-"
+        self._populate_dropdown(filter_text="", selected_text=selected)
+        super().showPopup()
 
     def setCurrentText(self, text):
-        """Ensure the text is set correctly, mapping '-' or empty to no selection."""
-        self.blockSignals(True)  # Prevent signal emission during programmatic update
+        """Set the current value without losing the stored dropdown options."""
         if text == "-" or not text:
-            super().setCurrentIndex(0)  # Select first item ('-')
+            self._populate_dropdown(filter_text="", selected_text="-")
         else:
-            super().setCurrentText(text)
-            if text not in self._all_items and text != "-":
-                self.addItem(text)
-                super().setCurrentText(text)
-        self.blockSignals(False)
+            self._populate_dropdown(filter_text="", selected_text=text)
 
 
 class Worker(QObject):
@@ -212,17 +271,23 @@ class Worker(QObject):
         return shape(mapping(force_2d(geom)))
 
     def fetch_settlements_geojson(self):
-        """Fetch settlements GeoJSON from the server and force to EPSG:4326."""
-        try:
-            # Check if we should use a local file
-            if hasattr(self, 'use_local_file') and self.use_local_file and hasattr(self, 'local_filepath'):
-                self.log.emit(f"Using local file: {self.local_filepath}")
-                with open(self.local_filepath, 'r', encoding='utf-8') as f:
-                    geojson = json.load(f)
-            else:
-                # Fetch from server as usual
-                headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
-                self.log.emit(f"Fetching {self.parent_entity_name} GeoJSON…")
+        """Fetch parent GeoJSON from the server or a user-selected local cache file."""
+        geojson = None
+        downloaded = False
+        fallback = getattr(self, 'local_fallback_filepath', None)
+
+        if getattr(self, 'use_local_file', False):
+            if not fallback or not os.path.exists(fallback):
+                raise FileNotFoundError(
+                    f"No local parent GeoJSON file found at {fallback or '(not set)'}"
+                )
+            self.log.emit(f"Using existing local file selected by user: {fallback}")
+            with open(fallback, 'r', encoding='utf-8') as f:
+                geojson = json.load(f)
+        else:
+            headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
+            try:
+                self.log.emit(f"Fetching {self.parent_entity_name} GeoJSON from server…")
                 response = requests.get(
                     f"{self.url}/api/v1/data/geo/minimal",
                     headers=headers,
@@ -231,37 +296,49 @@ class Worker(QObject):
                 )
                 response.raise_for_status()
                 geojson = response.json()
+                downloaded = True
+            except Exception as e:
+                if fallback and os.path.exists(fallback):
+                    self.log.emit(
+                        f"Warning: Could not download {self.parent_entity_name} GeoJSON ({e}). "
+                        f"Using cached local file: {fallback}"
+                    )
+                    with open(fallback, 'r', encoding='utf-8') as f:
+                        geojson = json.load(f)
+                else:
+                    msg = f"Error fetching {self.parent_entity_name} GeoJSON: {e}"
+                    if fallback:
+                        msg += f" No cached local file at {fallback}."
+                    self.log.emit(msg)
+                    raise
 
+        try:
             if not isinstance(geojson, dict) or "features" not in geojson or geojson.get('type') != 'FeatureCollection':
                 raise ValueError("Invalid GeoJSON format")
 
-            # Save GeoJSON to file (only if not using local file)
-            if not (hasattr(self, 'use_local_file') and self.use_local_file):
+            if downloaded:
                 try:
-                    # Create Documents/ODK_Data directory if it doesn't exist
                     documents_path = os.path.expanduser("~/Documents")
                     odk_data_path = os.path.join(documents_path, "ODK_Data")
                     os.makedirs(odk_data_path, exist_ok=True)
-                    
-                    # Generate filename with timestamp
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
                     filename = f"parent({self.parent_entity_name}).geojson"
-                    filepath = os.path.join(odk_data_path, filename)
-                    
-                    # Save the GeoJSON data
+                    filepath = getattr(self, 'local_fallback_filepath', None) or os.path.join(
+                        odk_data_path, filename
+                    )
+
                     with open(filepath, 'w', encoding='utf-8') as f:
                         json.dump(geojson, f, indent=2, ensure_ascii=False)
-                    
+
                     self.log.emit(f"Saved {self.parent_entity_name} GeoJSON to: {filepath}")
-                    
-                    # Add the GeoJSON as a layer to the map
+
                     layer_name = f"{self.parent_entity_name.capitalize()} Boundaries"
                     layer = add_geojson_to_map(filepath, layer_name)
                     if layer:
                         self.log.emit(f"Added {layer_name} layer to QGIS map")
                     else:
                         self.log.emit(f"Warning: Could not add {layer_name} layer to map")
-                        
+
                 except Exception as save_error:
                     self.log.emit(f"Warning: Could not save GeoJSON file: {str(save_error)}")
 
@@ -823,8 +900,9 @@ class FieldMatchingWorker(QObject):
 
 
 class KesMISDialog(QDialog, CollapsibleHelpMixin):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        configure_qgis_dialog(self, parent)
         self.setWindowTitle("Export data to KeSMIS")
         resize_dialog_to_screen(self, min_width=720, min_height=600, max_width=960, max_height=800)
 
@@ -882,10 +960,30 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         # Layer and Parent Selection
         layer_box = QGroupBox("Layer and Parent Selection")
         layer_layout = QVBoxLayout()
+
+        settlement_layout = QHBoxLayout()
+        self.settlement_layer_combo = QComboBox()
+        self.settlement_layer_combo.setEnabled(False)
+        self.settlement_layer_combo.currentTextChanged.connect(self._update_code_guidance)
+        self.sync_settlement_codes_button = QPushButton("Sync Settlement Codes from KeSMIS")
+        self.sync_settlement_codes_button.clicked.connect(self.sync_settlement_codes_for_selection)
+        self.sync_settlement_codes_button.setEnabled(False)
+        self.sync_settlement_codes_button.setToolTip(
+            "Match the selected settlement layer to KeSMIS by geometry, preview matches, then copy codes."
+        )
+        settlement_layout.addWidget(QLabel("Select Settlement Layer:"))
+        settlement_layout.addWidget(self.settlement_layer_combo, 1)
+        settlement_layout.addWidget(self.sync_settlement_codes_button)
+
+        self.code_guidance_label = QLabel("")
+        self.code_guidance_label.setWordWrap(True)
+        self.code_guidance_label.setStyleSheet("color: #8a4b00;")
+
         layer_selection_layout = QHBoxLayout()
         self.layer_combo = QComboBox()
         self.layer_combo.setEnabled(False)
         self.layer_combo.currentTextChanged.connect(self.reset_data)
+        self.layer_combo.currentTextChanged.connect(self._update_code_guidance)
         layer_selection_layout.addWidget(QLabel("Select Layer:"))
         layer_selection_layout.addWidget(self.layer_combo)
         parent_selection_layout = QHBoxLayout()
@@ -898,19 +996,15 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         entity_selection_layout = QHBoxLayout()
         self.entity_combo = SearchableComboBox()
         self.entity_combo.setEnabled(False)
-        self.entity_combo.currentTextChanged.connect(self.match_fields)
+        self.entity_combo.activated.connect(self._on_entity_activated)
         self.entity_combo.setPlaceholderText("Search entities...")
         entity_selection_layout.addWidget(QLabel("Select Entity:"))
         entity_selection_layout.addWidget(self.entity_combo)
-        helper_layout = QHBoxLayout()
-        self.populate_code_button = QPushButton("Populate Code in Selected Layers")
-        self.populate_code_button.clicked.connect(self.populate_code_in_all_layers)
-        helper_layout.addWidget(self.populate_code_button)
-        helper_layout.addStretch()
+        layer_layout.addLayout(settlement_layout)
+        layer_layout.addWidget(self.code_guidance_label)
         layer_layout.addLayout(layer_selection_layout)
         layer_layout.addLayout(parent_selection_layout)
         layer_layout.addLayout(entity_selection_layout)
-        layer_layout.addLayout(helper_layout)
         layer_box.setLayout(layer_layout)
         layer_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         top_layout.addWidget(layer_box, 1)
@@ -939,7 +1033,9 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         dry_run_layout = QHBoxLayout()
         self.dry_run_checkbox = QCheckBox("Dry Run (Test Mode)")
         self.dry_run_checkbox.setChecked(False)
-        self.dry_run_checkbox.setToolTip("Enable to test with a limited number of records before full submission")
+        self.dry_run_checkbox.setToolTip(
+            "Validate a limited number of records on the server without saving them"
+        )
         dry_run_layout.addWidget(self.dry_run_checkbox)
         dry_run_layout.addWidget(QLabel("Number of records:"))
         self.dry_run_spinbox = QSpinBox()
@@ -947,7 +1043,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.dry_run_spinbox.setMaximum(1000)
         self.dry_run_spinbox.setValue(10)
         self.dry_run_spinbox.setEnabled(False)
-        self.dry_run_spinbox.setToolTip("Number of records to process in dry run mode")
+        self.dry_run_spinbox.setToolTip("Number of records to validate in dry run mode")
         self.dry_run_checkbox.toggled.connect(self.dry_run_spinbox.setEnabled)
         self.dry_run_checkbox.toggled.connect(self.update_submit_button_text)
         self.dry_run_spinbox.valueChanged.connect(self.update_submit_button_text)
@@ -1010,6 +1106,9 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         # Try auto-login if we have a saved token
         if self.token:
             QTimer.singleShot(100, self.auto_login_with_token)
+        else:
+            self.populate_settlement_layers()
+            self._update_code_guidance()
 
     @staticmethod
     def _help_html():
@@ -1019,6 +1118,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         <h4>Quick start</h4>
         <ol>
+            <li><b>Settlement codes</b> &mdash; choose the settlement layer, click <b>Sync Settlement Codes from KeSMIS</b>, review the matches, then transfer codes.</li>
             <li><b>Server Login</b> &mdash; enter the KeSMIS URL, username, and password, then click <b>Login</b>.</li>
             <li><b>Select Layer</b> &mdash; choose the QGIS vector layer to export.</li>
             <li><b>Parent entity</b> &mdash; pick <code>settlement</code> or <code>ward</code> for spatial matching.</li>
@@ -1030,124 +1130,727 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         <p>Layer fields are matched to API fields automatically. Use the filter box to search mappings and adjust API field selections in the table.</p>
 
         <h4>Dry run</h4>
-        <p>Enable <b>Dry Run</b> to test with a limited number of records before a full submission.</p>
+        <p>Enable <b>Dry Run</b> to validate a limited number of records on the server. Nothing is saved until you run a full submission.</p>
 
         <h4>Code column</h4>
-        <p>Layers should include a <code>code</code> column for pcode matching. Click <b>Populate Code in Selected Layers</b> to add or fill missing codes directly on the selected layers in your current QGIS session.</p>
+        <p>When you select a layer, the plugin checks for a <code>code</code> field. If it is missing on a non-settlement layer, you can allow automatic code generation or cancel.</p>
+        <p><b>Settlement layers:</b> do not generate random codes. Use <b>Sync Settlement Codes from KeSMIS</b> so codes match the server and avoid duplicates on import.</p>
         """
 
-    def populate_code_in_all_layers(self):
-        """Add or fill the 'code' field on user-selected vector layers."""
-        layers = [
+    SETTLEMENT_SYNC_FIELD = "kesmis_sync"
+
+    def _get_settlement_layers(self):
+        return [
             layer for layer in QgsProject.instance().mapLayers().values()
-            if isinstance(layer, QgsVectorLayer)
+            if isinstance(layer, QgsVectorLayer) and is_settlement_data_layer(layer.name())
         ]
-        if not layers:
-            self.log_message("No vector layers found in the project.")
-            QMessageBox.information(self, "Populate Code", "No vector layers found in the project.")
-            return
 
-        selected_layers = self._select_layers_for_code(layers)
-        if not selected_layers:
-            self.log_message("Populate code cancelled or no layers selected.")
-            return
+    def _is_layer_kesmis_synced(self, layer):
+        """A layer is marked synced when the kesmis_sync field exists with any value."""
+        field_names = {f.name().lower() for f in layer.fields()}
+        if self.SETTLEMENT_SYNC_FIELD not in field_names:
+            return False
+        idx = -1
+        for i, f in enumerate(layer.fields()):
+            if f.name().lower() == self.SETTLEMENT_SYNC_FIELD:
+                idx = i
+                break
+        if idx < 0:
+            return False
+        for feature in layer.getFeatures():
+            value = feature[idx]
+            if value is not None and str(value).strip():
+                return True
+        return False
 
-        self.populate_code_button.setEnabled(False)
-        self.log_message(f"Populating 'code' on {len(selected_layers)} selected layer(s)...")
-        QApplication.processEvents()
+    def _update_code_guidance(self):
+        settlement_layers = self._get_settlement_layers()
+        selected_settlement = self.settlement_layer_combo.currentData()
 
-        success = 0
-        skipped = 0
-        errors = 0
-        for layer in selected_layers:
-            try:
-                if process_layer(layer, log=self.log_message):
-                    success += 1
-                else:
-                    skipped += 1
-            except Exception as e:
-                errors += 1
-                self.log_message(f"Error on layer '{layer.name()}': {e}")
-
-        self.log_message(f"Done. Saved on {success} layer(s), skipped {skipped}, errors {errors}.")
-        self.populate_layers()
-        if self.layer_combo.currentData():
-            self.reset_data()
-        self.populate_code_button.setEnabled(True)
-
-        if success > 0 and errors == 0 and skipped == 0:
-            QMessageBox.information(
-                self,
-                "Populate Code",
-                f"Successfully populated code on {success} layer(s).",
+        if selected_settlement:
+            if self._is_layer_kesmis_synced(selected_settlement):
+                self.code_guidance_label.setText(
+                    f"Settlement layer '{selected_settlement.name()}' is already synced with KeSMIS "
+                    f"(marked in the '{self.SETTLEMENT_SYNC_FIELD}' field). Codes were copied from the server. "
+                    "Syncing again is disabled to protect the official codes."
+                )
+                self.sync_settlement_codes_button.setEnabled(False)
+                return
+            self.code_guidance_label.setText(
+                f"Settlement layer selected: '{selected_settlement.name()}'. "
+                "Click Sync Settlement Codes from KeSMIS to match features by geometry, "
+                "review the matches, then copy official codes from the server."
             )
+            self.sync_settlement_codes_button.setEnabled(bool(self.token))
+        elif settlement_layers:
+            names = ", ".join(f"'{layer.name()}'" for layer in settlement_layers)
+            self.code_guidance_label.setText(
+                f"Settlement layer(s) detected: {names}. "
+                "Select a settlement layer from the dropdown above, then click "
+                "Sync Settlement Codes from KeSMIS."
+            )
+            self.sync_settlement_codes_button.setEnabled(False)
         else:
+            self.code_guidance_label.setText(
+                "Select a layer to import. A code field is required; you will be prompted "
+                "to generate codes if the selected layer does not have one."
+            )
+            self.sync_settlement_codes_button.setEnabled(False)
+
+    def _layer_has_code_field(self, layer):
+        return any(field.name().lower() == "code" for field in layer.fields())
+
+    def _clear_layer_selection(self):
+        self.layer_combo.blockSignals(True)
+        if self.layer_combo.count() > 0:
+            self.layer_combo.setCurrentIndex(0)
+        self.layer_combo.blockSignals(False)
+
+    def _ensure_layer_code_ready(self, layer):
+        """Ensure the selected layer can proceed; prompt to generate codes when needed."""
+        if is_settlement_data_layer(layer.name()):
             QMessageBox.warning(
                 self,
-                "Populate Code",
-                f"Finished with issues.\n\n"
-                f"Saved: {success}\n"
-                f"Skipped: {skipped}\n"
-                f"Errors: {errors}\n\n"
-                f"See the log for details.",
+                "Settlement Layer",
+                f"'{layer.name()}' looks like a settlement layer.\n\n"
+                "Use Sync Settlement Codes from KeSMIS for settlement layers instead of "
+                "generating random codes here.",
             )
+            self._clear_layer_selection()
+            return False
 
-    def _select_layers_for_code(self, layers):
-        """Ask the user which loaded vector layers should receive/fill code values."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Select Layers for Code")
-        dialog.setMinimumWidth(340)
+        if self._layer_has_code_field(layer):
+            return True
 
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(6)
+        reply = QMessageBox.question(
+            self,
+            "Missing Code Field",
+            f"The layer '{layer.name()}' has no 'code' field.\n\n"
+            "Generate unique codes for features that need them?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            QMessageBox.information(
+                self,
+                "Code Required",
+                "Import cannot continue without a 'code' field on the selected layer.",
+            )
+            self._clear_layer_selection()
+            return False
 
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QScrollArea.NoFrame)
-        scroll_widget = QWidget()
-        checkbox_layout = QVBoxLayout(scroll_widget)
-        checkbox_layout.setContentsMargins(0, 0, 0, 0)
-        checkbox_layout.setSpacing(2)
-        checkboxes = []
+        if not process_layer(layer, log=self.log_message):
+            QMessageBox.warning(
+                self,
+                "Code Generation Failed",
+                f"Could not add or fill the 'code' field on '{layer.name()}'.\n\n"
+                "See the log for details.",
+            )
+            self._clear_layer_selection()
+            return False
 
-        for layer in layers:
-            checkbox = QCheckBox(layer.name())
-            checkbox.setChecked(not layer.name().strip().endswith(" Boundaries"))
-            checkbox.setProperty("layer_id", layer.id())
-            checkboxes.append(checkbox)
-            checkbox_layout.addWidget(checkbox)
+        self.log_message(f"Generated 'code' values for layer '{layer.name()}'.")
+        return True
 
-        scroll_area.setWidget(scroll_widget)
-        layout.addWidget(scroll_area)
+    def _feature_label(self, props, feature_id):
+        for key in ("name", "settlement_name", "Name", "label", "settlement", "title"):
+            value = props.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return f"Feature {feature_id}"
 
-        action_layout = QHBoxLayout()
-        select_all_button = QPushButton("Select All")
-        clear_button = QPushButton("Clear")
-        ok_button = QPushButton("Run")
-        cancel_button = QPushButton("Cancel")
+    def _kesmis_label(self, kesmis_row):
+        for key in ("name", "settlement_name", "Name", "label", "title"):
+            if key in kesmis_row and kesmis_row[key] is not None and str(kesmis_row[key]).strip():
+                return str(kesmis_row[key]).strip()
+        if kesmis_row.get("id") is not None:
+            return f"Settlement ID {kesmis_row['id']}"
+        code = kesmis_row.get("code")
+        if code is not None and str(code).strip():
+            return f"Code {code}"
+        return "KeSMIS settlement"
 
-        select_all_button.clicked.connect(lambda: [cb.setChecked(True) for cb in checkboxes])
-        clear_button.clicked.connect(lambda: [cb.setChecked(False) for cb in checkboxes])
-        ok_button.clicked.connect(dialog.accept)
-        cancel_button.clicked.connect(dialog.reject)
-
-        action_layout.addWidget(select_all_button)
-        action_layout.addWidget(clear_button)
-        action_layout.addStretch()
-        action_layout.addWidget(ok_button)
-        action_layout.addWidget(cancel_button)
-        layout.addLayout(action_layout)
-
-        if dialog.exec_() != QDialog.Accepted:
+    def _find_intersecting_settlements(self, feature_geom, settlements_gdf):
+        """Return all KeSMIS settlements intersecting a feature, best overlap first."""
+        if feature_geom is None or feature_geom.is_empty:
             return []
 
-        selected_layer_ids = {
-            checkbox.property("layer_id")
-            for checkbox in checkboxes
-            if checkbox.isChecked()
-        }
-        return [layer for layer in layers if layer.id() in selected_layer_ids]
+        candidate_idx = list(settlements_gdf.sindex.intersection(feature_geom.bounds))
+        if not candidate_idx:
+            return []
+
+        results = []
+        for cand in candidate_idx:
+            settlement_geom = settlements_gdf.geometry.iloc[cand]
+            if feature_geom.geom_type == "Point":
+                if not (
+                    settlement_geom.contains(feature_geom)
+                    or settlement_geom.touches(feature_geom)
+                    or settlement_geom.intersects(feature_geom)
+                ):
+                    continue
+                overlap = 1.0
+            else:
+                if not settlement_geom.intersects(feature_geom):
+                    continue
+                try:
+                    overlap = settlement_geom.intersection(feature_geom).area
+                except Exception:
+                    continue
+                if overlap <= 0:
+                    continue
+
+            row = settlements_gdf.iloc[cand]
+            kesmis_code = self._row_code(row)
+            if not kesmis_code:
+                continue
+            results.append(
+                {
+                    "kesmis_label": self._kesmis_label(row),
+                    "kesmis_code": kesmis_code,
+                    "overlap": overlap,
+                }
+            )
+
+        results.sort(key=lambda item: item["overlap"], reverse=True)
+        return results
+
+    def _generate_settlement_short_code(self, existing_codes):
+        while True:
+            code = shortuuid.uuid()[:8]
+            if code not in existing_codes:
+                existing_codes.add(code)
+                return code
+
+    def _settlement_transfer_status(self, current_code, kesmis_code, is_generated=False):
+        if is_generated:
+            return "Will generate new code"
+        if not kesmis_code:
+            return "No KeSMIS code available"
+        if not current_code:
+            return "Will copy code"
+        if current_code == kesmis_code:
+            return "Already matches"
+        return "Will replace code"
+
+    def _compute_settlement_matches(self, layer, settlements_gdf):
+        layer_gdf = self._build_gdf_from_layer(layer, include_fid=True)
+        if layer_gdf.empty:
+            return []
+
+        code_idx = None
+        field_names = [f.name() for f in layer.fields()]
+        if "code" in field_names:
+            code_idx = layer.fields().indexOf("code")
+        elif "code" in {name.lower(): idx for idx, name in enumerate(field_names)}:
+            code_idx = {name.lower(): idx for idx, name in enumerate(field_names)}["code"]
+
+        matches = []
+        for _, row in layer_gdf.iterrows():
+            feature_id = row.get("_qgis_fid")
+            if feature_id is None:
+                continue
+
+            props = {k: v for k, v in row.items() if k not in ("geometry", "_qgis_fid")}
+            local_label = self._feature_label(props, feature_id)
+            current_code = ""
+            if code_idx is not None and code_idx >= 0:
+                value = layer.getFeature(feature_id)[code_idx]
+                if value is not None:
+                    current_code = str(value).strip()
+
+            candidates = self._find_intersecting_settlements(row.geometry, settlements_gdf)
+            matches.append(
+                {
+                    "feature_id": feature_id,
+                    "local_label": local_label,
+                    "current_code": current_code,
+                    "candidates": candidates,
+                }
+            )
+
+        return matches
+
+    def _resolve_settlement_matches(self, layer_name, matches):
+        """Let the user pick KeSMIS matches or confirm generated codes for non-intersections."""
+        if not matches:
+            return None
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review Settlement Matches")
+        dialog.setMinimumSize(820, 460)
+
+        layout = QVBoxLayout(dialog)
+        multi_count = sum(1 for m in matches if len(m["candidates"]) > 1)
+        no_match_count = sum(1 for m in matches if not m["candidates"])
+        intro = QLabel(
+            f"Review matches for '{layer_name}'.\n"
+            f"Features with multiple KeSMIS intersections: {multi_count}\n"
+            f"Features with no intersection (will get a new short code): {no_match_count}\n"
+            "Choose the correct KeSMIS settlement where needed, then click Transfer Codes."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        table = QTableWidget(len(matches), 5)
+        table.setHorizontalHeaderLabels(
+            ["Local Settlement", "Current Code", "KeSMIS Match", "Code To Apply", "Status"]
+        )
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        existing_codes = set()
+        for match in matches:
+            if match["current_code"]:
+                existing_codes.add(match["current_code"])
+            for candidate in match["candidates"]:
+                existing_codes.add(candidate["kesmis_code"])
+
+        selectors = []
+        for row, match in enumerate(matches):
+            table.setItem(row, 0, QTableWidgetItem(match["local_label"]))
+            table.setItem(row, 1, QTableWidgetItem(match["current_code"]))
+
+            candidates = match["candidates"]
+            if len(candidates) > 1:
+                combo = QComboBox()
+                for candidate in candidates:
+                    combo.addItem(
+                        f"{candidate['kesmis_label']} ({candidate['kesmis_code']})",
+                        candidate,
+                    )
+
+                def update_combo_row(table_row, combo_box, row_match):
+                    selected = combo_box.currentData()
+                    table.setItem(table_row, 3, QTableWidgetItem(selected["kesmis_code"]))
+                    table.setItem(
+                        table_row,
+                        4,
+                        QTableWidgetItem(
+                            self._settlement_transfer_status(
+                                row_match["current_code"],
+                                selected["kesmis_code"],
+                            )
+                        ),
+                    )
+
+                combo.currentIndexChanged.connect(
+                    lambda _idx, table_row=row, combo_box=combo, row_match=match: update_combo_row(
+                        table_row, combo_box, row_match
+                    )
+                )
+                table.setCellWidget(row, 2, combo)
+                selectors.append(("combo", combo))
+                selected = candidates[0]
+            elif len(candidates) == 1:
+                selected = candidates[0]
+                table.setItem(row, 2, QTableWidgetItem(selected["kesmis_label"]))
+                selectors.append(("fixed", selected))
+            else:
+                generated = self._generate_settlement_short_code(existing_codes)
+                selected = {
+                    "kesmis_label": "No KeSMIS intersection — new code",
+                    "kesmis_code": generated,
+                    "generated": True,
+                }
+                table.setItem(row, 2, QTableWidgetItem(selected["kesmis_label"]))
+                selectors.append(("generated", selected))
+
+            table.setItem(row, 3, QTableWidgetItem(selected["kesmis_code"]))
+            status = self._settlement_transfer_status(
+                match["current_code"],
+                selected["kesmis_code"],
+                is_generated=selected.get("generated", False),
+            )
+            table.setItem(row, 4, QTableWidgetItem(status))
+
+        table.resizeColumnsToContents()
+        layout.addWidget(table)
+
+        if no_match_count:
+            note = QLabel(
+                f"{no_match_count} feature(s) did not intersect any KeSMIS settlement. "
+                "A new short code will be generated for each of those features."
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet("color: #8a4b00;")
+            layout.addWidget(note)
+
+        buttons = QHBoxLayout()
+        transfer_button = QPushButton("Transfer Codes")
+        cancel_button = QPushButton("Cancel")
+        transfer_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+        buttons.addStretch()
+        buttons.addWidget(transfer_button)
+        buttons.addWidget(cancel_button)
+        layout.addLayout(buttons)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+
+        resolved = []
+        for row, match in enumerate(matches):
+            selector_type, selector = selectors[row]
+            if selector_type == "combo":
+                selected = selector.currentData()
+            else:
+                selected = selector
+
+            kesmis_code = selected["kesmis_code"]
+            is_generated = selected.get("generated", False)
+            resolved.append(
+                {
+                    "feature_id": match["feature_id"],
+                    "local_label": match["local_label"],
+                    "current_code": match["current_code"],
+                    "kesmis_label": selected["kesmis_label"],
+                    "kesmis_code": kesmis_code,
+                    "is_generated": is_generated,
+                    "status": self._settlement_transfer_status(
+                        match["current_code"],
+                        kesmis_code,
+                        is_generated=is_generated,
+                    ),
+                }
+            )
+        return resolved
+
+    def _row_code(self, row):
+        for key in ("code", "pcode", "settlement_code", "Code", "PCODE"):
+            if key in row.index and row[key] is not None and str(row[key]).strip():
+                return str(row[key]).strip()
+        return ""
+
+    def _normalize_kesmis_code_column(self, gdf):
+        if gdf.empty:
+            return gdf, None
+
+        gdf = gdf.copy()
+        for col in ("code", "pcode", "settlement_code", "Code", "PCODE"):
+            if col in gdf.columns and gdf[col].notna().any():
+                if col != "code":
+                    gdf["code"] = gdf[col]
+                return gdf, col
+
+        lower_map = {str(c).lower(): c for c in gdf.columns if c != "geometry"}
+        for col in ("code", "pcode", "settlement_code"):
+            if col in lower_map:
+                src = lower_map[col]
+                if gdf[src].notna().any():
+                    gdf["code"] = gdf[src]
+                    return gdf, src
+        return gdf, None
+
+    def _enrich_settlement_codes_from_ids(self, gdf, url, headers):
+        if "id" not in gdf.columns:
+            return gdf, None
+
+        ids = []
+        for value in gdf["id"].dropna().unique():
+            try:
+                ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if not ids:
+            return gdf, None
+
+        code_by_id = {}
+        batch_size = 200
+        endpoints = [
+            f"{url}/api/v1/data/many/id",
+            f"{url}/api/v1/data/many/ids",
+        ]
+        for endpoint in endpoints:
+            for start in range(0, len(ids), batch_size):
+                batch = ids[start:start + batch_size]
+                try:
+                    response = requests.post(
+                        endpoint,
+                        headers=headers,
+                        json={"model": "settlement", "ids": batch},
+                        timeout=60,
+                    )
+                    if response.status_code != 200:
+                        continue
+                    payload = response.json()
+                    records = payload.get("data", payload if isinstance(payload, list) else [])
+                    for rec in records:
+                        rec_id = rec.get("id")
+                        rec_code = rec.get("code") or rec.get("pcode")
+                        if rec_id is not None and rec_code is not None and str(rec_code).strip():
+                            code_by_id[int(rec_id)] = str(rec_code).strip()
+                except Exception as e:
+                    self.log_message(f"Settlement code lookup failed at {endpoint}: {e}")
+            if code_by_id:
+                break
+
+        if not code_by_id:
+            return gdf, None
+
+        gdf = gdf.copy()
+
+        def lookup_code(value):
+            if value is None or str(value).strip() == "":
+                return None
+            try:
+                return code_by_id.get(int(value))
+            except (TypeError, ValueError):
+                return None
+
+        gdf["code"] = gdf["id"].apply(lookup_code)
+        return gdf, "code"
+
+    def _fetch_kesmis_settlements_gdf(self, url, headers):
+        fetch_attempts = [
+            ("geo/minimal", f"{url}/api/v1/data/geo/minimal", {"model": "settlement"}),
+            ("geo/full", f"{url}/api/v1/data/geo", {"model": "settlement"}),
+        ]
+        last_columns = []
+        last_error = None
+
+        for label, endpoint, params in fetch_attempts:
+            try:
+                response = requests.get(endpoint, headers=headers, params=params, timeout=60)
+                response.raise_for_status()
+                gdf = self._build_gdf_from_geojson(response.json())
+                if gdf.empty:
+                    last_error = f"KeSMIS {label} returned no settlement features."
+                    continue
+
+                last_columns = [c for c in gdf.columns if c != "geometry"]
+                gdf, code_field = self._normalize_kesmis_code_column(gdf)
+                if not code_field and "id" in gdf.columns:
+                    gdf, code_field = self._enrich_settlement_codes_from_ids(gdf, url, headers)
+
+                if code_field:
+                    gdf = gdf[gdf["code"].notna() & (gdf["code"].astype(str).str.strip() != "")]
+                    if gdf.empty:
+                        last_error = f"KeSMIS {label} returned settlements but no usable code values."
+                        continue
+                    self.log_message(
+                        f"Loaded {len(gdf)} KeSMIS settlement(s) from {label} using '{code_field}'."
+                    )
+                    return gdf
+
+                last_error = (
+                    f"KeSMIS {label} returned no code field. Available columns: {', '.join(last_columns)}"
+                )
+                self.log_message(last_error)
+            except Exception as e:
+                last_error = str(e)
+                self.log_message(f"KeSMIS {label} settlement fetch failed: {e}")
+
+        if last_columns:
+            raise ValueError(
+                "KeSMIS settlement data has no code field. "
+                f"Available columns: {', '.join(last_columns)}"
+            )
+        raise ValueError(last_error or "Could not load settlement data from KeSMIS.")
+
+    def _apply_settlement_code_matches(self, layer, matches):
+        from qgis.core import edit
+
+        transferable = [
+            m for m in matches
+            if m["kesmis_code"] and m["status"] in (
+                "Will copy code",
+                "Will replace code",
+                "Already matches",
+                "Will generate new code",
+            )
+        ]
+        if not transferable:
+            return 0, 0, 0, 0
+
+        filled = 0
+        updated = 0
+        unchanged = 0
+        generated = 0
+        sync_stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        with edit(layer):
+            code_idx = self._ensure_code_field_index(layer)
+            sync_idx = self._ensure_sync_field_index(layer)
+            for match in transferable:
+                feature_id = match["feature_id"]
+                kesmis_code = match["kesmis_code"]
+                current_code = match["current_code"]
+                is_generated = match.get("is_generated", False)
+                if is_generated:
+                    generated += 1
+                if not current_code:
+                    layer.changeAttributeValue(feature_id, code_idx, kesmis_code)
+                    filled += 1
+                elif current_code == kesmis_code:
+                    unchanged += 1
+                else:
+                    layer.changeAttributeValue(feature_id, code_idx, kesmis_code)
+                    updated += 1
+                if sync_idx >= 0:
+                    layer.changeAttributeValue(feature_id, sync_idx, sync_stamp)
+
+        return filled, updated, unchanged, generated
+
+    def _ensure_sync_field_index(self, layer):
+        """Ensure the kesmis_sync marker field exists; must be called inside an edit session."""
+        for i, f in enumerate(layer.fields()):
+            if f.name().lower() == self.SETTLEMENT_SYNC_FIELD:
+                return i
+        from qgis.core import QgsField
+        layer.addAttribute(QgsField(self.SETTLEMENT_SYNC_FIELD, QVariant.String))
+        layer.updateFields()
+        return layer.fields().indexOf(self.SETTLEMENT_SYNC_FIELD)
+
+    def _ensure_code_field_index(self, layer):
+        fields = layer.fields()
+        field_names = [f.name() for f in fields]
+        lower_to_index = {name.lower(): idx for idx, name in enumerate(field_names)}
+        if "code" in lower_to_index:
+            idx = lower_to_index["code"]
+            if field_names[idx] != "code":
+                layer.renameAttribute(idx, "code")
+                layer.updateFields()
+            return layer.fields().indexOf("code")
+        from qgis.core import QgsField
+        layer.addAttribute(QgsField("code", QVariant.String))
+        layer.updateFields()
+        return layer.fields().indexOf("code")
+
+    def _build_gdf_from_layer(self, layer, include_fid=False):
+        srid = layer.crs().postgisSrid() or 4326
+        features = []
+        for f in layer.getFeatures():
+            props = {
+                field: self._convert_to_serializable(f[field])
+                for field in [fld.name() for fld in layer.fields()]
+            }
+            if include_fid:
+                props["_qgis_fid"] = f.id()
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": json.loads(f.geometry().asJson()) if f.geometry() else None,
+                    "properties": props,
+                }
+            )
+        gdf = gpd.GeoDataFrame.from_features(features, crs=f"EPSG:{srid}")
+        if gdf.empty:
+            return gdf
+        gdf["geometry"] = gdf["geometry"].apply(self.to_2d)
+        return gdf.to_crs(epsg=4326)
+
+    def _build_gdf_from_geojson(self, geojson):
+        records = []
+        for feat in geojson.get("features", []):
+            geom_dict = feat.get("geometry")
+            if not geom_dict:
+                continue
+            try:
+                geom = validate_and_repair_geometry(shape(geom_dict))
+            except Exception:
+                continue
+            if geom is None or geom.is_empty:
+                continue
+            props = feat.get("properties")
+            if props is None:
+                props = {k: v for k, v in feat.items() if k not in ("geometry", "type")}
+            record = dict(props)
+            record["geometry"] = geom
+            records.append(record)
+        if not records:
+            return gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs="EPSG:4326")
+        gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:4326")
+        gdf.set_crs(epsg=4326, inplace=True)
+        return gdf
+
+    def sync_settlement_codes_for_selection(self):
+        layer = self.settlement_layer_combo.currentData()
+        if not layer:
+            settlement_layers = self._get_settlement_layers()
+            if not settlement_layers:
+                QMessageBox.information(
+                    self,
+                    "No Settlement Layers",
+                    "No settlement data layers were detected in the project.\n\n"
+                    "Layers are treated as settlements when their name contains 'settlement' "
+                    "(excluding reference layers ending in ' Boundaries').",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Select Settlement Layer",
+                    "Choose the settlement layer to match against KeSMIS before syncing codes.",
+                )
+            return
+
+        if not self.token:
+            QMessageBox.warning(
+                self,
+                "Login Required",
+                "Log in to KeSMIS before syncing settlement codes from the server.",
+            )
+            return
+
+        if self._is_layer_kesmis_synced(layer):
+            QMessageBox.information(
+                self,
+                "Already Synced",
+                f"Layer '{layer.name()}' is already synced with KeSMIS.\n\n"
+                f"Features are marked in the '{self.SETTLEMENT_SYNC_FIELD}' field with the sync date. "
+                "To re-sync, remove that field from the layer first.",
+            )
+            self._update_code_guidance()
+            return
+
+        self._sync_settlement_codes_from_kesmis(layer)
+
+    def _sync_settlement_codes_from_kesmis(self, layer):
+        layer_name = layer.name()
+        self.log_message(f"Fetching KeSMIS settlements and matching '{layer_name}'...")
+        self.sync_settlement_codes_button.setEnabled(False)
+        QApplication.processEvents()
+
+        url = self.url_input.text().rstrip("/")
+        headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
+        try:
+            settlements_gdf = self._fetch_kesmis_settlements_gdf(url, headers)
+
+            matches = self._compute_settlement_matches(layer, settlements_gdf)
+            if not matches:
+                QMessageBox.warning(self, "No Features", f"Layer '{layer_name}' contains no features.")
+                return
+
+            resolved = self._resolve_settlement_matches(layer_name, matches)
+            if not resolved:
+                self.log_message("Settlement code transfer cancelled.")
+                return
+
+            filled, updated, unchanged, generated = self._apply_settlement_code_matches(layer, resolved)
+            summary = (
+                f"Settlement code transfer finished for '{layer_name}'.\n\n"
+                f"New codes copied: {filled}\n"
+                f"Existing codes replaced: {updated}\n"
+                f"Already matched: {unchanged}\n"
+                f"New short codes generated (no KeSMIS intersection): {generated}\n\n"
+                f"Synced features are marked in the '{self.SETTLEMENT_SYNC_FIELD}' field, "
+                "and syncing is now disabled for this layer."
+            )
+            self.log_message(summary.replace("\n", " "))
+            QMessageBox.information(self, "Settlement Code Sync", summary)
+
+            self.populate_layers()
+            if self.layer_combo.currentData():
+                self.reset_data()
+        except Exception as e:
+            self.log_message(f"Failed to sync settlement codes for '{layer_name}': {e}")
+            QMessageBox.critical(
+                self,
+                "Settlement Code Sync Failed",
+                f"Could not sync settlement codes for '{layer_name}':\n{e}",
+            )
+        finally:
+            self._update_code_guidance()
 
     def clear_search(self):
         """Clear the search input and show all table rows."""
@@ -1197,18 +1900,16 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         layer = self.layer_combo.currentData()
         if layer:
+            if not self._ensure_layer_code_ready(layer):
+                self.gdf = None
+                self.log_message("Layer selection cleared because code requirements were not met.")
+                self._update_code_guidance()
+                return
+
             try:
                 # 1) Grab the layer's native SRID
                 srid = layer.crs().postgisSrid()
                 self.log_message(f"Layer CRS SRID detected: {srid}")
-
-                # Non-blocking hint: the populate-code workflow can fix this.
-                layer_fields = [f.name() for f in layer.fields()]
-                if "code" not in layer_fields:
-                    self.log_message(
-                        "Selected layer missing 'code'. Use Populate Code in Selected Layers "
-                        "to add/fill it on the current layer."
-                    )
 
                 # 2) Build a list of GeoJSON‐like feature dicts
                 features = [
@@ -1241,10 +1942,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     QMessageBox.critical(self, "Projection Error", f"Failed to reproject layer: {str(e)}")
                     return
 
-                # 5) Do NOT auto-generate 'code' values; require user to add column externally
-                # If 'code' column is absent, proceed without it (it's optional for upload)
-
-                # 6) Set geojson column from the already reprojected geometry
+                # 3) Set geojson column from the already reprojected geometry
                 self.gdf["geojson"] = self.gdf.geometry.apply(
                     lambda geom: geom.__geo_interface__ if geom is not None else None
                 )
@@ -1260,11 +1958,58 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             self.log_message("No valid layer selected.")
 
         self.log_message("Cleared pcode data and field mappings due to layer change.")
+        self._update_code_guidance()
 
         if self.parent_combo.currentText():
             self.start_fetch_pcode_data()
 
- 
+    def _prompt_parent_geojson_source(self, parent_entity, layer_name, local_filepath):
+        """Ask how parent boundaries should be loaded before spatial matching."""
+        layer_loaded = any(
+            lyr.name() == layer_name for lyr in QgsProject.instance().mapLayers().values()
+        )
+        local_exists = os.path.exists(local_filepath)
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Load Parent Boundaries")
+        msg.setIcon(QMessageBox.Question)
+        msg.setText(f"Load parent boundaries for '{parent_entity}'?")
+        status_lines = [
+            "These boundaries are used to match your features to the correct parent entity "
+            "during Import.",
+            "",
+            "Current status:",
+        ]
+        if layer_loaded:
+            status_lines.append(f"- Layer '{layer_name}' is already loaded in QGIS.")
+        else:
+            status_lines.append(f"- Layer '{layer_name}' is not loaded in QGIS.")
+        if local_exists:
+            status_lines.append(f"- Cached local file found:\n  {local_filepath}")
+        else:
+            status_lines.append("- No cached local GeoJSON file was found.")
+        status_lines.append("")
+        status_lines.append(
+            "Choose how to load parent boundaries. Downloading from the server is recommended "
+            "so spatial matching uses the latest data."
+        )
+        msg.setInformativeText("\n".join(status_lines))
+
+        download_btn = msg.addButton("Download fresh from server", QMessageBox.AcceptRole)
+        local_btn = msg.addButton("Use existing local file", QMessageBox.ActionRole)
+        cancel_btn = msg.addButton("Cancel", QMessageBox.RejectRole)
+        msg.setDefaultButton(download_btn)
+        if not local_exists:
+            local_btn.setEnabled(False)
+
+        msg.exec_()
+        clicked = msg.clickedButton()
+        if clicked == cancel_btn:
+            return None
+        if clicked == local_btn:
+            return "local"
+        return "download"
+
     def start_fetch_pcode_data(self):
         """Start fetching pcode data in a background thread."""
         if not self.layer_combo.currentData() or not self.parent_combo.currentText():
@@ -1272,51 +2017,32 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         parent_entity = self.parent_combo.currentText()
         layer_name = f"{parent_entity.capitalize()} Boundaries"
-        use_local_file = False
-        local_filepath = None
-        
-        # 1. Check if layer is already loaded (inform user but continue)
-        layer_already_loaded = False
-        for lyr in QgsProject.instance().mapLayers().values():
-            if lyr.name() == layer_name:
-                layer_already_loaded = True
-                self.log_message(f"Layer '{layer_name}' is already loaded in QGIS.")
-                break
 
-        # 2. Check if file exists in ODK_Data
         documents_path = os.path.expanduser("~/Documents")
         odk_data_path = os.path.join(documents_path, "ODK_Data")
+        os.makedirs(odk_data_path, exist_ok=True)
         filename = f"parent({parent_entity}).geojson"
-        filepath = os.path.join(odk_data_path, filename)
-        if os.path.exists(filepath):
-            if layer_already_loaded:
-                # Layer is already loaded, use the existing file for intersection
-                use_local_file = True
-                local_filepath = filepath
-                self.log_message(f"Using existing {layer_name} layer and local file for intersection")
-            else:
-                reply = QMessageBox.question(
-                    self,
-                    "Parent GeoJSON Exists",
-                    f"A local file for this parent already exists:\n{filepath}\n\nDo you want to use the existing file (skip download) or fetch a fresh copy?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
-                )
-                if reply == QMessageBox.Yes:
-                    # Use the local file for intersection
-                    use_local_file = True
-                    local_filepath = filepath
-                    # Load the file as a layer
-                    lyr = add_geojson_to_map(filepath, layer_name)
-                    if lyr:
-                        self.log_message(f"Loaded existing {layer_name} from file: {filepath}")
-                    else:
-                        self.log_message(f"Failed to load existing {layer_name} from file: {filepath}")
-                # else: continue to fetch fresh
+        fallback_filepath = os.path.join(odk_data_path, filename)
+
+        source_choice = self._prompt_parent_geojson_source(
+            parent_entity, layer_name, fallback_filepath
+        )
+        if source_choice is None:
+            self.log_message("Parent boundary load cancelled.")
+            return
 
         self.pcode_entity_data = {}
         self.valid_feature_indices = []
-        self.log_message(f"Starting pcode data fetch for parent entity '{self.parent_combo.currentText()}'")
+        if source_choice == "local":
+            self.log_message(
+                f"Starting pcode data fetch for parent entity '{parent_entity}' "
+                f"(using existing local GeoJSON file)"
+            )
+        else:
+            self.log_message(
+                f"Starting pcode data fetch for parent entity '{parent_entity}' "
+                f"(downloading parent GeoJSON from server)"
+            )
 
         self.layer_combo.setEnabled(False)
         self.parent_combo.setEnabled(False)
@@ -1332,15 +2058,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             self.url_input.text(),
             self.token
         )
-
-        # Set the local file flag and path if using local file
-        if use_local_file:
-            self.worker.use_local_file = True
-            self.worker.local_filepath = local_filepath
-        else:
-            self.worker.use_local_file = False
-            self.worker.local_filepath = None
-
+        self.worker.local_fallback_filepath = fallback_filepath
+        self.worker.use_local_file = source_choice == "local"
         self.worker.gdf = self.gdf
         self.worker.moveToThread(self.thread)
         self.worker.progress.connect(self.progress_bar.setValue)
@@ -1542,14 +2261,57 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             self.settings.remove("auth_token")
             self.is_logged_in = False
 
+    def populate_settlement_layers(self):
+        """Populate settlement layer dropdown without auto-selecting a layer."""
+        current_layer = self.settlement_layer_combo.currentData()
+        current_id = current_layer.id() if current_layer else None
+        self.settlement_layer_combo.blockSignals(True)
+        self.settlement_layer_combo.clear()
+        self.settlement_layer_combo.addItem("— Select settlement layer —", None)
+        settlement_layers = self._get_settlement_layers()
+        for layer in settlement_layers:
+            self.settlement_layer_combo.addItem(layer.name(), layer)
+
+        selected_index = 0
+        if current_id is not None:
+            for i in range(self.settlement_layer_combo.count()):
+                layer = self.settlement_layer_combo.itemData(i)
+                if layer and layer.id() == current_id:
+                    selected_index = i
+                    break
+        self.settlement_layer_combo.setCurrentIndex(selected_index)
+        self.settlement_layer_combo.setEnabled(bool(settlement_layers))
+        self.settlement_layer_combo.blockSignals(False)
+
     def populate_layers(self):
-        """Populate available layers from QGIS canvas."""
+        """Populate available layers from QGIS canvas without auto-selecting a layer."""
+        current_layer = self.layer_combo.currentData()
+        current_id = current_layer.id() if current_layer else None
+        self.layer_combo.blockSignals(True)
         self.layer_combo.clear()
-        layers = QgsProject.instance().mapLayers().values()
-        for layer in layers:
-            if isinstance(layer, QgsVectorLayer):
-                self.layer_combo.addItem(layer.name(), layer)
-        self.layer_combo.setEnabled(True)
+        self.layer_combo.addItem("— Select layer —", None)
+        vector_layers = [
+            layer for layer in QgsProject.instance().mapLayers().values()
+            if isinstance(layer, QgsVectorLayer)
+        ]
+        for layer in vector_layers:
+            self.layer_combo.addItem(layer.name(), layer)
+
+        selected_index = 0
+        if current_id is not None:
+            for i in range(self.layer_combo.count()):
+                layer = self.layer_combo.itemData(i)
+                if layer and layer.id() == current_id:
+                    selected_index = i
+                    break
+        self.layer_combo.setCurrentIndex(selected_index)
+        self.layer_combo.setEnabled(bool(vector_layers))
+        self.layer_combo.blockSignals(False)
+
+        self.populate_settlement_layers()
+        self._update_code_guidance()
+        if not self.layer_combo.currentData():
+            self.reset_data()
 
     def fetch_entities(self, base_url):
         """Fetch entities from API and populate the entity combo box."""
@@ -1565,7 +2327,6 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 self.api_entities = data.get("models", [])
                 # Sort entities by model name
                 self.api_entities.sort(key=lambda e: e.get("model", "").lower())
-                self.entity_combo.clear()
                 entity_names = [entity["model"] for entity in self.api_entities]
                 self.entity_combo.addItems(entity_names)
                 for i, entity in enumerate(self.api_entities):
@@ -1577,6 +2338,14 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 self.log_message(f"Failed to fetch entities: {response.text}")
         except Exception as e:
             self.log_message(f"Error fetching entities: {str(e)}")
+
+    def _on_entity_activated(self, index):
+        """Run field matching only after the user confirms an entity choice."""
+        if getattr(self.entity_combo, "_updating", False):
+            return
+        if index <= 0:
+            return
+        self.match_fields()
 
     def match_fields(self):
         """Start field matching in a background thread."""
@@ -1685,6 +2454,22 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             return None
         return value
 
+    def _format_import_error_lines(self, errors, limit=15):
+        """Format API import errors for display in logs and message boxes."""
+        lines = []
+        for err in errors[:limit]:
+            item = err.get("item") or {}
+            code = item.get("code") or item.get("id") or "<unknown>"
+            error = err.get("error") or "Error"
+            detail = err.get("detail") or ""
+            line = f"• {code}: {error}"
+            if detail:
+                line += f" — {detail}"
+            lines.append(line)
+        if len(errors) > limit:
+            lines.append(f"... and {len(errors) - limit} more error(s)")
+        return lines
+
     def submit_features(self):
         """Submit features to API in batches of 100 with progress updates."""
         try:
@@ -1761,8 +2546,10 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             if is_dry_run:
                 original_count = len(features)
                 features = features[:dry_run_limit]
-                self.log_message(f"DRY RUN MODE: Processing {len(features)} of {original_count} features (limit: {dry_run_limit})")
-                self.log_message("This is a test run - data will be submitted to the server but you can review the results.")
+                self.log_message(
+                    f"DRY RUN MODE: Validating {len(features)} of {original_count} features "
+                    f"(limit: {dry_run_limit}). No records will be saved."
+                )
 
             # Batch submission setup
             batch_size = 100
@@ -1782,14 +2569,19 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             for start in range(0, total, batch_size):
                 batch = features[start:start + batch_size]
                 batch_num = start // batch_size + 1
-                self.log_message(f"Submitting batch {batch_num} ({start+1}–{min(start+batch_size, total)} of {total})…")
+                action = "Validating batch" if is_dry_run else "Submitting batch"
+                self.log_message(f"{action} {batch_num} ({start+1}–{min(start+batch_size, total)} of {total})…")
                 try:
+                    payload = {"model": entity["model"], "data": batch}
+                    if is_dry_run:
+                        payload["dryRun"] = True
                     resp = requests.post(
                         f"{url}/api/v1/data/import/upsert",
-                        json={"model": entity["model"], "data": batch},
+                        json=payload,
                         headers=headers,
                         timeout=30
                     )
+                    resp.raise_for_status()
                     data = resp.json()
                     all_inserted += data.get("insertedCount", 0)
                     all_updated += data.get("updatedCount", 0)
@@ -1808,14 +2600,27 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             self.progress_bar.setVisible(False)
 
             if is_dry_run:
-                summary = f"DRY RUN COMPLETE: {all_inserted} inserted, {all_updated} updated, {all_failed} failed (out of {dry_run_limit} test records)."
+                summary = (
+                    f"DRY RUN COMPLETE (nothing saved):\n\n"
+                    f"Would insert: {all_inserted}\n"
+                    f"Would update: {all_updated}\n"
+                    f"Failed: {all_failed} (out of {dry_run_limit} test records)"
+                )
+                dialog_title = "Dry Run Complete"
             else:
                 summary = f"Done: {all_inserted} inserted, {all_updated} updated, {all_failed} failed."
-            self.log_message(summary)
+                dialog_title = "Import Complete"
+
+            self.log_message(summary.replace("\n", " "))
             for err in all_errors:
-                code = err.get("item", {}).get("code", "<unknown>")
+                code = (err.get("item") or {}).get("code", "<unknown>")
                 self.log_message(f"Error {code}: {err.get('error')} — {err.get('detail')}")
-            QMessageBox.information(self, "Import Complete", summary)
+
+            if is_dry_run and all_errors:
+                summary += "\n\nErrors:\n" + "\n".join(self._format_import_error_lines(all_errors))
+                QMessageBox.warning(self, dialog_title, summary)
+            else:
+                QMessageBox.information(self, dialog_title, summary)
 
         except Exception as e:
             self.log_message(f"Error submitting features: {e}")
@@ -1830,7 +2635,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         """Update submit button text based on dry run mode."""
         if self.dry_run_checkbox.isChecked():
             limit = self.dry_run_spinbox.value()
-            self.submit_button.setText(f"Submit Data to KeSMIS (Dry Run: {limit} records)")
+            self.submit_button.setText(f"Validate on KeSMIS (Dry Run: {limit} records)")
         else:
             self.submit_button.setText("Submit Data to KeSMIS")
     

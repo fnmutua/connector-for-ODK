@@ -78,6 +78,39 @@ Required packages:
 
 *Figure 2 — Installing Python packages in OSGeo4W Shell from your QGIS installation folder*
 
+**Troubleshooting: fixing a missing package error**
+
+If QGIS shows a yellow bar such as *"Couldn't load plugin 'connect_odk'…"* or the **Message Log** reports `ModuleNotFoundError: No module named '…'`, a required Python package is not installed in the QGIS Python environment.
+
+![Missing package error banner](screenshots/figure-2b-stacktrace.png)
+
+*Figure 3 — Plugin load error when a required Python package is missing*
+
+Click **View message log** (or open **View → Panels → Log Messages → Python Error**) to see which package is missing.
+
+![Message log with ModuleNotFoundError](screenshots/figure-2c-missingpackage.png)
+
+*Figure 4 — Message log showing the missing package (example: `shortuuid`)*
+
+**How to fix it**
+
+1. Note the **package name** in the error (the name inside quotes after `No module named`).
+2. **Close QGIS** completely.
+3. Open **OSGeo4W Shell** from your QGIS installation folder (see above).
+4. Install the missing package. You can install **all** required packages (recommended):
+
+```
+python -m pip install numpy pandas geopandas fiona shapely pyproj fpdf2 requests fuzzywuzzy rapidfuzz shortuuid openpyxl xlsxwriter
+```
+
+   Or install **only the missing package** (replace `shortuuid` with the name from your error):
+
+```
+python -m pip install shortuuid
+```
+
+5. **Restart QGIS**. Connector for ODK should load without the error.
+
 ### 2.3 Data and access
 
 Depending on which tools you use, you may also need:
@@ -101,7 +134,7 @@ Depending on which tools you use, you may also need:
 
 ![Plugin Manager search](screenshots/figure3.png)
 
-*Figure 3 — Plugin Manager with Connector for ODK selected*
+*Figure 5 — Plugin Manager with Connector for ODK selected*
 
 ### Option B — Install from ZIP
 
@@ -113,7 +146,7 @@ Depending on which tools you use, you may also need:
 
 ![Install from ZIP](screenshots/figure4.png)
 
-*Figure 4 — Installing the plugin from a ZIP file*
+*Figure 6 — Installing the plugin from a ZIP file*
 
 ### Verify installation
 
@@ -124,7 +157,7 @@ After QGIS restarts, you should see:
 
 ![Plugins menu](screenshots/figure5.png)
 
-*Figure 5 — Plugins menu with all four tools listed*
+*Figure 7 — Plugins menu with all four tools listed*
 
 ---
 
@@ -134,7 +167,7 @@ Download ODK form submissions and add them to your map.
 
 ![Get Data login](screenshots/figrue6-getdata.png)
 
-*Figure 6 — Get Data dialog with ODK Central login*
+*Figure 8 — Get Data dialog with ODK Central login*
 
 ### Steps
 
@@ -147,11 +180,11 @@ Download ODK form submissions and add them to your map.
 
 ![Get Data ready to process](screenshots/figure7.png)
 
-*Figure 7 — Project and form selected before processing*
+*Figure 9 — Project and form selected before processing*
 
 ![Map with submissions layer](screenshots/figure8.png)
 
-*Figure 8 — Submissions loaded as a layer on the QGIS map*
+*Figure 10 — Submissions loaded as a layer on the QGIS map*
 
 ### Notes
 
@@ -162,7 +195,7 @@ Download ODK form submissions and add them to your map.
 
 ![Get Data help panel](screenshots/figure9.png)
 
-*Figure 9 — Collapsible help panel in Get Data*
+*Figure 11 — Collapsible help panel in Get Data*
 
 ---
 
@@ -180,7 +213,7 @@ Create separate in-memory layers for each unique value in a chosen attribute fie
 
 ![Split Layer dialog](screenshots/figure15.png)
 
-*Figure 10 — Split Layer dialog*
+*Figure 12 — Split Layer dialog*
 
 ### Result
 
@@ -209,7 +242,7 @@ Run quality checks on File Geodatabase layers and export issue layers, spreadshe
 
 ![QA/QC interface](screenshots/figure12a.png)
 
-*Figure 11 — QA/QC interface*
+*Figure 13 — QA/QC interface*
 
 ### Checks performed
 
@@ -236,7 +269,7 @@ Run quality checks on File Geodatabase layers and export issue layers, spreadshe
 
 ![QA/QC completed run](screenshots/figure12b.png)
 
-*Figure 12 — Completed run with report and output folder links*
+*Figure 14 — Completed run with report and output folder links*
 
 ### Attribute dictionary
 
@@ -244,7 +277,7 @@ Run quality checks on File Geodatabase layers and export issue layers, spreadshe
 
 ![QA/QC help panel](screenshots/figure13.png)
 
-*Figure 13 — Help panel showing dictionary download link*
+*Figure 15 — Help panel showing dictionary download link*
 
 ### Outputs
 
@@ -252,7 +285,7 @@ For each layer and issue type, `.gpkg` and `.xlsx` files are written to the outp
 
 ![QA/QC output folder](screenshots/figure14.png)
 
-*Figure 14 — Example QA/QC output files in the output folder*
+*Figure 16 — Example QA/QC output files in the output folder*
 
 ---
 
@@ -262,21 +295,21 @@ Upload QGIS vector layer features to a KeSMIS server with automatic field mappin
 
 ![Import dialog](screenshots/figure10.png)
 
-*Figure 15 — Import dialog with layer, entity, and field mapping*
+*Figure 17 — Import dialog with layer, entity, and field mapping*
 
 ### Steps
 
-1. **Populate code in loaded layers** — Load your vector layer(s) in QGIS, open **Plugins → Connector for ODK → Import**, click **Populate Code in Selected Layers**, tick the layers to update, and click **Run**. A message confirms success or reports any skipped layers (see Figure 16). Layers need a `code` column for pcode matching.
+1. **Populate code in loaded layers** — Load your vector layer(s) in QGIS, open **Plugins → Connector for ODK → Import**, click **Populate Code in Selected Layers**, tick the layers to update, and click **Run**. A message confirms success or reports any skipped layers (see Figure 18). Layers need a `code` column for pcode matching.
 
 ![Populate Code dialog](screenshots/figure11.png)
 
-*Figure 16 — Layer selection dialog for Populate Code*
+*Figure 18 — Layer selection dialog for Populate Code*
 
 2. **Server Login** — enter the KeSMIS URL, username, and password, then click **Login**.
 3. **Select Layer** — choose the QGIS vector layer to export.
 4. **Select Parent Entity** — choose `settlement` or `ward` for spatial matching.
 5. **Select Entity** — choose the API entity/model to submit to.
-6. Review the **Field Mapping** table (see Figure 15). Use the filter box to search fields and adjust API field selections if needed.
+6. Review the **Field Mapping** table (see Figure 17). Use the filter box to search fields and adjust API field selections if needed.
 7. Click **Submit Data to KeSMIS**.
 
 ### Dry run
@@ -291,7 +324,7 @@ Enable **Dry Run (Test Mode)** to submit only a limited number of records before
 | Issue                                | What to try                                                                                                 |
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
 | Plugin does not appear after install | Restart QGIS. Check **Plugins → Manage and Install Plugins → Installed** that Connector for ODK is enabled. |
-| Package install fails                | Close QGIS. Open **OSGeo4W Shell** from your QGIS installation folder, then install packages as shown in Section 2.2. |
+| Package install fails                | See **Fixing a missing package error** in Section 2.2. Close QGIS, open **OSGeo4W Shell** from your QGIS installation folder, install the missing package (or all packages), then restart QGIS. |
 | ODK / KeSMIS login fails             | Confirm URL, username, and password. Check network access to the server.                                    |
 | Import missing `code` field          | Use **Populate Code in Selected Layers** before submitting.                                                 |
 | QA/QC attribute check skipped        | Ensure `dictionary.xlsx` has a sheet matching the layer name.                                               |
@@ -308,24 +341,26 @@ For updates, bug reports, and source code:
 ## Screenshot checklist
 
 
-| Figure | File                  | What to capture                               |
-| ------ | --------------------- | --------------------------------------------- |
-| 1      | `figure1.png`         | QGIS toolbar + Plugins menu                   |
-| 2      | `figure2.png`         | OSGeo4W Shell pip install (from QGIS install folder) |
-| 3      | `figure3.png`         | Plugin Manager search                         |
-| 4      | `figure4.png`         | Install from ZIP tab                          |
-| 5      | `figure5.png`         | Connector for ODK submenu                     |
-| 6      | `figrue6-getdata.png` | Get Data — login screen                       |
-| 7      | `figure7.png`         | Get Data — project/form selected              |
-| 8      | `figure8.png`         | Map with submissions layer                    |
-| 9      | `figure9.png`         | Get Data help panel                           |
-| 10     | `figure15.png`        | Split Layer dialog                            |
-| 11     | `figure12a.png`       | QA/QC — interface                             |
-| 12     | `figure12b.png`       | QA/QC — finished                              |
-| 13     | `figure13.png`        | QA/QC help + dictionary link                  |
-| 14     | `figure14.png`        | Output folder contents                        |
-| 15     | `figure10.png`        | Import — main dialog (includes field mapping) |
-| 16     | `figure11.png`        | Populate Code layer picker                    |
+| Figure | File                            | What to capture                               |
+| ------ | ------------------------------- | --------------------------------------------- |
+| 1      | `figure1.png`                   | QGIS toolbar + Plugins menu                   |
+| 2      | `figure2.png`                   | OSGeo4W Shell pip install (from QGIS install folder) |
+| 3      | `figure-2b-stacktrace.png`      | Missing package error banner                  |
+| 4      | `figure-2c-missingpackage.png`  | Message log with `ModuleNotFoundError`        |
+| 5      | `figure3.png`                   | Plugin Manager search                         |
+| 6      | `figure4.png`                   | Install from ZIP tab                          |
+| 7      | `figure5.png`                   | Connector for ODK submenu                     |
+| 8      | `figrue6-getdata.png`           | Get Data — login screen                       |
+| 9      | `figure7.png`                   | Get Data — project/form selected              |
+| 10     | `figure8.png`                   | Map with submissions layer                    |
+| 11     | `figure9.png`                   | Get Data help panel                           |
+| 12     | `figure15.png`                  | Split Layer dialog                            |
+| 13     | `figure12a.png`                 | QA/QC — interface                             |
+| 14     | `figure12b.png`                 | QA/QC — finished                              |
+| 15     | `figure13.png`                  | QA/QC help + dictionary link                  |
+| 16     | `figure14.png`                  | Output folder contents                        |
+| 17     | `figure10.png`                  | Import — main dialog (includes field mapping) |
+| 18     | `figure11.png`                  | Populate Code layer picker                    |
 
 
 ---

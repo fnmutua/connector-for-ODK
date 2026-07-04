@@ -48,7 +48,7 @@ import tempfile
 import os
 from pathlib import Path
 
-from .help_panel import CollapsibleHelpMixin
+from .help_panel import CollapsibleHelpMixin, configure_qgis_dialog
 
 # Optional imports for advanced functionality
 try:
@@ -178,9 +178,10 @@ class ConnectODKDialog(QDialog, CollapsibleHelpMixin):
  
     """Dialog to get user input for ODK Central credentials and form selection."""
 
-    def __init__(self, default_url="", default_username="", default_password=""):
+    def __init__(self, parent=None, default_url="", default_username="", default_password=""):
         """Constructor."""
-        super().__init__()
+        super().__init__(parent)
+        configure_qgis_dialog(self, parent)
 
         self.settings = QSettings("AGS", "ODKConnect")
 

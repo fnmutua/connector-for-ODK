@@ -34,6 +34,7 @@ def clean(text):
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = text.replace("**", "").replace("`", "")
     text = text.replace("—", "-").replace("–", "-").replace("→", "->")
+    text = text.replace("…", "...")
     text = text.replace("«", "<<").replace("»", ">>")
     text = text.replace("²", "2").replace("°", " deg").replace("·", "-")
     return text.strip()

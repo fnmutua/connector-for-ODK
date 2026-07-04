@@ -12,12 +12,13 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
-from .help_panel import CollapsibleHelpMixin, resize_dialog_to_screen
+from .help_panel import CollapsibleHelpMixin, resize_dialog_to_screen, configure_qgis_dialog
 
 
 class SplitLayerDialog(QDialog, CollapsibleHelpMixin):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        configure_qgis_dialog(self, parent)
         self.setWindowTitle("Split Layer")
         resize_dialog_to_screen(self, min_width=320, min_height=140, max_width=560, max_height=260)
 

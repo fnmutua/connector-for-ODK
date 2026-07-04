@@ -22,9 +22,13 @@ from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeatureRequest, QgsFields, QgsFeature, QgsWkbTypes
 )
 
+from .help_panel import configure_qgis_dialog
+
+
 class ProcessGDBDialog(QDialog):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        configure_qgis_dialog(self, parent)
         self.setWindowTitle("Quality Assurance / Quality Control")
         self.setMinimumSize(480, 420)
         self._resize_to_available_screen()
