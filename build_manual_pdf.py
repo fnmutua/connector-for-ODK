@@ -1,5 +1,6 @@
-"""Build Connector for ODK user manual PDF from MANUAL.md with embedded screenshots."""
+"""Build Connector for ODK user manual PDFs from markdown with embedded screenshots."""
 
+import argparse
 import os
 import re
 
@@ -8,8 +9,19 @@ from PIL import Image
 
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-MANUAL = os.path.join(ROOT, "MANUAL.md")
-OUTPUT = os.path.join(ROOT, "Connector_for_ODK_User_Manual_v2.0.pdf")
+
+EDITIONS = {
+    "admin": {
+        "manual": "MANUAL_v1_admin.md",
+        "output": "Connector_for_ODK_User_Manual_v1_Admin.pdf",
+        "header": "Connector for ODK - User Manual v1 (Administrator)",
+    },
+    "standard": {
+        "manual": "MANUAL_v2.md",
+        "output": "Connector_for_ODK_User_Manual_v2.pdf",
+        "header": "Connector for ODK - User Manual v2 (Standard)",
+    },
+}
 
 MARGIN = 18
 PAGE_W = 210
@@ -28,8 +40,9 @@ def clean(text):
 
 
 class ManualPDF(FPDF):
-    def __init__(self):
+    def __init__(self, header_text):
         super().__init__()
+        self.header_text = header_text
         self.set_auto_page_break(auto=True, margin=22)
 
     def content_top(self):
@@ -47,7 +60,7 @@ class ManualPDF(FPDF):
         self.set_font("Helvetica", "I", 8)
         self.set_text_color(110, 110, 110)
         self.set_xy(MARGIN, 10)
-        self.cell(CONTENT_W, 5, "Connector for ODK - User Manual v2.0", align="C")
+        self.cell(CONTENT_W, 5, self.header_text, align="C")
         self.set_draw_color(210, 210, 210)
         self.line(MARGIN, 17, PAGE_W - MARGIN, 17)
 
@@ -225,22 +238,24 @@ def parse_table(lines, start):
     return rows, i
 
 
-def build():
-    with open(MANUAL, encoding="utf-8") as f:
+def build_edition(edition_key):
+    edition = EDITIONS[edition_key]
+    manual_path = os.path.join(ROOT, edition["manual"])
+    output_path = os.path.join(ROOT, edition["output"])
+
+    with open(manual_path, encoding="utf-8") as f:
         lines = f.read().splitlines()
 
-    pdf = ManualPDF()
+    pdf = ManualPDF(edition["header"])
     pdf.set_margins(MARGIN, MARGIN, MARGIN)
     pdf.add_page()
 
     i = 0
     in_code = False
     code_buf = []
-    skip_checklist = False
 
     while i < len(lines):
-        raw = lines[i]
-        line = raw.strip()
+        line = lines[i].strip()
 
         if line == "## Screenshot checklist":
             break
@@ -313,9 +328,21 @@ def build():
         pdf.paragraph(line)
         i += 1
 
-    pdf.output(OUTPUT)
-    print(f"Created: {OUTPUT}")
+    pdf.output(output_path)
+    print(f"Created: {output_path}")
+
+
+def build(editions=None):
+    for key in editions or EDITIONS:
+        build_edition(key)
 
 
 if __name__ == "__main__":
-    build()
+    parser = argparse.ArgumentParser(description="Build Connector for ODK user manual PDFs.")
+    parser.add_argument(
+        "--edition",
+        choices=sorted(EDITIONS),
+        help="Build one edition (default: build both admin and standard).",
+    )
+    args = parser.parse_args()
+    build([args.edition] if args.edition else None)
