@@ -19,7 +19,7 @@ repository=https://github.com/fnmutua/connector-for-ODK
 # Recommended items:
 
 hasProcessingProvider=no
-changelog=Version 2.1: KeSMIS login popup with auto-login progress and logout. Settlement code sync from KeSMIS with multi-match review and kesmis_sync marker. Import dry-run validation. QA/QC pinned processing options, compact parameters, and help panel open by default. Template geodatabase and dictionary reference downloads. Help panel download links no longer clear help text. Dialogs scoped to QGIS main window.
+changelog=Version 2.1: KeSMIS login popup with auto-login progress and logout. Settlement code sync from KeSMIS with multi-match review and kesmis_sync marker. Import dry-run validation. QA/QC pinned processing options, compact parameters, and help panel open by default. Bundled template geodatabase and dictionary reference downloads. Help panel download links no longer clear help text. Dialogs scoped to QGIS main window.
 
 # Tags are comma separated with spaces allowed
 tags=python, odk, odk central, kesmis, qa, qc, geodatabase, import, export
