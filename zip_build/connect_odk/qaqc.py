@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QTextBrowser, QScrollArea, QGridLayout, QWidget, QApplication, QSizePolicy,
     QSplitter,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QGuiApplication, QDesktopServices
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeatureRequest, QgsFields, QgsFeature, QgsWkbTypes
@@ -83,10 +83,10 @@ class ProcessGDBDialog(QDialog):
         main_layout.addWidget(select_inputs_box)
 
         parameters_box = QGroupBox("Set Parameters")
-        parameters_layout = QVBoxLayout()
-
-        params_group = QGroupBox("Linear Feature Parameters")
-        angular_params_layout = QVBoxLayout()
+        parameters_layout = QGridLayout()
+        parameters_layout.setContentsMargins(8, 6, 8, 6)
+        parameters_layout.setHorizontalSpacing(8)
+        parameters_layout.setVerticalSpacing(4)
         self.min_angle_spinbox = QSpinBox()
         self.min_angle_spinbox.setRange(0, 360)
         self.min_angle_spinbox.setPrefix("Min Angle: ")
@@ -95,21 +95,13 @@ class ProcessGDBDialog(QDialog):
         self.max_angle_spinbox.setRange(0, 360)
         self.max_angle_spinbox.setPrefix("Max Angle: ")
         self.max_angle_spinbox.setValue(45)
-        angular_params_layout.addWidget(self.min_angle_spinbox)
-        angular_params_layout.addWidget(self.max_angle_spinbox)
-        params_group.setLayout(angular_params_layout)
-        parameters_layout.addWidget(params_group)
-
-        length_group = QGroupBox("Length Parameters")
-        length_params_layout = QVBoxLayout()
         self.min_length_spinbox = QSpinBox()
         self.min_length_spinbox.setRange(0, 50)
         self.min_length_spinbox.setPrefix("Min Length(m): ")
         self.min_length_spinbox.setValue(10)
-        length_params_layout.addWidget(self.min_length_spinbox)
-        length_group.setLayout(length_params_layout)
-        parameters_layout.addWidget(length_group)
-
+        parameters_layout.addWidget(self.min_angle_spinbox, 0, 0)
+        parameters_layout.addWidget(self.max_angle_spinbox, 0, 1)
+        parameters_layout.addWidget(self.min_length_spinbox, 1, 0, 1, 2)
         parameters_box.setLayout(parameters_layout)
         main_layout.addWidget(parameters_box)
 
@@ -123,8 +115,8 @@ class ProcessGDBDialog(QDialog):
         self.layer_selection_layout.setVerticalSpacing(2)
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setMinimumHeight(80)
-        self.scroll_area.setMaximumHeight(200)
+        self.scroll_area.setFixedHeight(140)
+        self.scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.scroll_widget = QWidget()
         self.scroll_widget.setLayout(self.layer_selection_layout)
         self.scroll_area.setWidget(self.scroll_widget)
@@ -134,7 +126,13 @@ class ProcessGDBDialog(QDialog):
         layer_box_layout.addWidget(self.select_all_checkbox)
         layer_box_layout.addWidget(self.scroll_area)
         self.layer_selection_box.setLayout(layer_box_layout)
+        self.layer_selection_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         main_layout.addWidget(self.layer_selection_box)
+
+        content_scroll = QScrollArea()
+        content_scroll.setWidgetResizable(True)
+        content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content_scroll.setWidget(content_widget)
 
         button_layout = QHBoxLayout()
         button_box = QGroupBox("Processing Options")
@@ -144,12 +142,6 @@ class ProcessGDBDialog(QDialog):
         self.run_all_button.clicked.connect(self.run_all_checks)
         button_layout.addWidget(self.run_all_button)
         button_layout.addStretch()
-        main_layout.addWidget(button_box)
-
-        content_scroll = QScrollArea()
-        content_scroll.setWidgetResizable(True)
-        content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        content_scroll.setWidget(content_widget)
 
         log_box = QGroupBox("Log")
         log_layout = QVBoxLayout(log_box)
@@ -191,6 +183,7 @@ class ProcessGDBDialog(QDialog):
         work_layout.setSpacing(6)
 
         work_layout.addWidget(content_scroll, 1)
+        work_layout.addWidget(button_box, 0)
         work_layout.addWidget(log_box, 0)
         work_layout.addWidget(self.progress_label)
         work_layout.addWidget(self.progress_bar)
@@ -204,6 +197,7 @@ class ProcessGDBDialog(QDialog):
         help_layout.setSpacing(0)
         self.help_browser = QTextBrowser()
         self.help_browser.setOpenExternalLinks(False)
+        self.help_browser.setOpenLinks(False)
         self.help_browser.setHtml(self._help_html())
         self.help_browser.anchorClicked.connect(self._on_help_link_clicked)
         self.help_browser.setMinimumWidth(220)
@@ -230,6 +224,14 @@ class ProcessGDBDialog(QDialog):
         self.toggle_help_button.clicked.connect(self._toggle_help_panel)
         button_layout.addWidget(self.toggle_help_button)
 
+        QTimer.singleShot(0, self._show_help_panel_on_load)
+
+    def _show_help_panel_on_load(self):
+        total = self.splitter.width() or self.width()
+        help_width = self._saved_help_width
+        self.splitter.setSizes([max(1, total - help_width), help_width])
+        self._update_help_toggle_label()
+
     def _toggle_help_panel(self):
         sizes = self.splitter.sizes()
         if sizes[1] > 0:
@@ -253,9 +255,18 @@ class ProcessGDBDialog(QDialog):
     def _dictionary_source_path(self):
         return os.path.join(os.path.dirname(__file__), "dictionary.xlsx")
 
+    def _template_geodatabase_zip_path(self):
+        return os.path.join(os.path.dirname(__file__), "template_geodatabase.zip")
+
+    def _template_geodatabase_gdb_path(self):
+        return os.path.join(os.path.dirname(__file__), "template_geodatabase.gdb")
+
     def _on_help_link_clicked(self, url):
         if url.scheme() == "download" and url.host() == "dictionary":
             self._download_dictionary()
+            return
+        if url.scheme() == "download" and url.host() == "template-gdb":
+            self._download_template_geodatabase()
             return
         QDesktopServices.openUrl(url)
 
@@ -285,6 +296,74 @@ class ProcessGDBDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Download failed", f"Could not save dictionary.xlsx:\n{e}")
 
+    def _download_template_geodatabase(self):
+        local_zip = self._template_geodatabase_zip_path()
+        local_gdb = self._template_geodatabase_gdb_path()
+        remote_url = "https://raw.githubusercontent.com/fnmutua/connector-for-ODK/main/template_geodatabase.zip"
+
+        if os.path.isdir(local_gdb):
+            dest_dir = QFileDialog.getExistingDirectory(
+                self,
+                "Choose folder for template geodatabase",
+                os.path.join(os.path.expanduser("~"), "Downloads"),
+            )
+            if not dest_dir:
+                return
+            target = os.path.join(dest_dir, "template_geodatabase.gdb")
+            try:
+                if os.path.exists(target):
+                    QMessageBox.warning(
+                        self,
+                        "Folder exists",
+                        f"A folder named template_geodatabase.gdb already exists at:\n{target}\n\n"
+                        "Choose a different destination or remove the existing folder first.",
+                    )
+                    return
+                shutil.copytree(local_gdb, target)
+                QMessageBox.information(
+                    self,
+                    "Download complete",
+                    f"Template geodatabase copied to:\n{target}",
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "Download failed", f"Could not copy template geodatabase:\n{e}")
+            return
+
+        default_path = os.path.join(os.path.expanduser("~"), "Downloads", "template_geodatabase.zip")
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save template geodatabase",
+            default_path,
+            "Zip archives (*.zip)",
+        )
+        if not save_path:
+            return
+
+        try:
+            if os.path.exists(local_zip):
+                shutil.copy2(local_zip, save_path)
+            else:
+                import requests
+                response = requests.get(remote_url, timeout=60)
+                response.raise_for_status()
+                with open(save_path, "wb") as outfile:
+                    outfile.write(response.content)
+            QMessageBox.information(
+                self,
+                "Download complete",
+                f"Template geodatabase saved to:\n{save_path}\n\n"
+                "Extract the ZIP to use the .gdb folder in QA/QC.",
+            )
+        except Exception as e:
+            QMessageBox.information(
+                self,
+                "Template not available yet",
+                "The template geodatabase has not been bundled with this plugin yet.\n\n"
+                "It will be added in a future update. If you already have "
+                "template_geodatabase.zip from your administrator, place it in the "
+                "plugin folder or extract the .gdb and use Select GeoDatabase.",
+            )
+
     def _help_html(self):
         return """
         <h3>QA/QC Tool</h3>
@@ -293,6 +372,7 @@ class ProcessGDBDialog(QDialog):
         <h4>Quick start</h4>
         <ol>
             <li><b>Select GeoDatabase</b> &mdash; choose the folder containing your <code>.gdb</code>.</li>
+            <li><b>Template &amp; dictionary</b> (reference) &mdash; provided for alignment with the expected submission structure. <a href="download://template-gdb">Download template geodatabase</a> QA/QC attribute checks use <code>dictionary.xlsx</code>. <a href="download://dictionary">Download dictionary.xlsx</a></li>
             <li><b>Select Output Folder</b> &mdash; where reports and issue layers are written (existing files are overwritten).</li>
             <li><b>Set parameters</b> &mdash; adjust angle and length thresholds if needed.</li>
             <li><b>Select layers</b> &mdash; tick the layers to check, or use <b>Select All</b>.</li>
@@ -314,10 +394,6 @@ class ProcessGDBDialog(QDialog):
             <li><b>Min / Max Angle</b> &mdash; flag vertices where the turn angle falls inside this range (default 1&deg;&ndash;45&deg;).</li>
             <li><b>Min Length (m)</b> &mdash; flag linear features shorter than this value (default 10&nbsp;m).</li>
         </ul>
-
-        <h4>Attribute dictionary</h4>
-        <p><code>dictionary.xlsx</code> is installed with the plugin. Each sheet should match a layer name and include columns <code>Attribute</code>, <code>Type</code>, and optionally <code>LEN</code> and <code>Options</code>.</p>
-        <p><a href="download://dictionary">Download dictionary.xlsx</a></p>
 
         <h4>Outputs</h4>
         <p>For each layer and issue type, a <code>.gpkg</code> and <code>.xlsx</code> are saved. A summary PDF (<code>database_summary_report.pdf</code>) is written to the output folder. Use the links below the log when processing finishes.</p>
@@ -398,11 +474,6 @@ class ProcessGDBDialog(QDialog):
             row = i // columns
             col = i % columns
             self.layer_selection_layout.addWidget(checkbox, row, col)
-
-        rows = max(1, (len(self.layers) + columns - 1) // columns)
-        layer_list_height = min(200, max(80, rows * 28 + 12))
-        self.scroll_area.setMinimumHeight(layer_list_height)
-        self.scroll_area.setMaximumHeight(layer_list_height)
 
     def validate_geodataframe(self, gdf):
         if "geometry" in gdf.columns and gdf.geometry.name != "geometry":
@@ -529,7 +600,7 @@ class ProcessGDBDialog(QDialog):
         
         try:
             xl = pd.ExcelFile(self.excel_file, engine='openpyxl')
-            sheet_names = xl.sheet_names
+            sheet_names = [s for s in xl.sheet_names if s.lower() != 'how to']
             match = process.extractOne(layer_name, sheet_names, score_cutoff=70)
             if not match:
                 self.log_message(f"No matching sheet found for layer {layer_name} (similarity score below 70).")

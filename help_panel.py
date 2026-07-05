@@ -68,6 +68,7 @@ class CollapsibleHelpMixin:
         help_layout.setSpacing(0)
         self.help_browser = QTextBrowser()
         self.help_browser.setOpenExternalLinks(False)
+        self.help_browser.setOpenLinks(False)
         self.help_browser.setHtml(help_html)
         handler = link_handler or self._default_help_link_clicked
         self.help_browser.anchorClicked.connect(handler)

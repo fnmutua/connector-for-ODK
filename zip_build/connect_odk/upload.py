@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox,
     QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox,
     QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QApplication,
-    QTableWidgetItem, QSizePolicy
+    QTableWidgetItem, QSizePolicy, QFormLayout, QStackedWidget,
 )
 from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
 from fuzzywuzzy import fuzz
@@ -899,39 +899,85 @@ class FieldMatchingWorker(QObject):
             self.finished.emit()
 
 
-class KesMISDialog(QDialog, CollapsibleHelpMixin):
+            self.finished.emit()
+
+
+def kesmis_validate_token(url, token):
+    """Return True when a saved KeSMIS token is still valid."""
+    if not url or not token:
+        return False
+    headers = {"Authorization": f"Bearer {token}", "x-access-token": token}
+    try:
+        response = requests.get(f"{url.rstrip('/')}/api/v1/models/list", headers=headers, timeout=5)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def kesmis_sign_in(url, username, password):
+    """Sign in to KeSMIS. Returns (token, error_message)."""
+    url = url.rstrip("/")
+    if not url or not username or not password:
+        return None, "URL, username, and password are required."
+    if not url.startswith(("http://", "https://")):
+        return None, "Server URL must start with http:// or https://"
+
+    login_url = f"{url}/api/auth/signin"
+    try:
+        response = requests.post(
+            login_url,
+            json={"username": username, "password": password},
+            timeout=10,
+        )
+        response.raise_for_status()
+    except requests.Timeout:
+        return None, "The server did not respond. Please check the URL and try again."
+    except requests.ConnectionError:
+        return None, "Could not connect to the server. Please check your network and URL."
+    except requests.HTTPError as e:
+        return None, f"Server returned an error: {e}"
+
+    if response.status_code != 200:
+        return None, response.text or "Login failed."
+
+    token = response.json().get("data")
+    if not token:
+        return None, "Login failed: no token received from server."
+    return token, None
+
+
+class KesMISLoginDialog(QDialog):
+    """Collect KeSMIS URL and credentials before opening the import dialog."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         configure_qgis_dialog(self, parent)
-        self.setWindowTitle("Export data to KeSMIS")
-        resize_dialog_to_screen(self, min_width=720, min_height=600, max_width=960, max_height=800)
+        self.setWindowTitle("KeSMIS Login")
 
-        # Initialize variables
-        self.token = None
-        self.api_entities = []
-        self.field_mapping = {}
-        self.pcode_fields = ["settlement_id", "ward_id", "subcounty_id", "county_id"]
-        self.is_logged_in = False
         self.settings = QSettings("YourOrganization", "KesMIS")
-        
-        # Load saved token if available (will be used after UI is created)
-        saved_token = self.settings.value("auth_token", "")
-        if saved_token:
-            self.token = saved_token
-        self.valid_feature_indices = []
-        self.gdf = None
-        self._full_table_data = []
+        self.url = ""
+        self.username = ""
+        self.password = ""
+        self.token = None
+        self._login_in_progress = False
 
-        # Main widget and layout
-        main_widget = QWidget()
-        main_layout = QVBoxLayout(main_widget)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(4)
 
-        # Horizontal layout for Server Login and Layer/Parent Selection
-        top_layout = QHBoxLayout()
+        self._form_widget = QWidget()
+        form_layout = QVBoxLayout(self._form_widget)
+        form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setSpacing(4)
+        intro = QLabel("Enter the KeSMIS server URL, username, and password to continue.")
+        intro.setWordWrap(True)
+        intro.setContentsMargins(0, 0, 0, 0)
+        form_layout.addWidget(intro)
 
-        # Server Login Section
-        login_box = QGroupBox("Server Login")
-        login_layout = QGridLayout()
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setVerticalSpacing(4)
+        form.setHorizontalSpacing(8)
         self.url_input = QLineEdit(self.settings.value("url", "http://localhost"))
         self.username_input = QLineEdit()
         self.username_input.setPlaceholderText("Username")
@@ -940,22 +986,152 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.password_input.setPlaceholderText("Password")
         self.password_input.setEchoMode(QLineEdit.Password)
         self.password_input.setText(self.settings.value("password", ""))
-        self.login_button = QPushButton("Login")
-        self.login_button.clicked.connect(self.login_to_server)
-        self.save_credentials = QCheckBox("Save Credentials")
+        form.addRow("Server URL:", self.url_input)
+        form.addRow("Username:", self.username_input)
+        form.addRow("Password:", self.password_input)
+        form_layout.addLayout(form)
+
+        self.save_credentials = QCheckBox("Save credentials")
         self.save_credentials.setChecked(bool(self.settings.value("username") and self.settings.value("password")))
-        self.save_credentials.stateChanged.connect(self.on_save_credentials_changed)
-        login_layout.addWidget(QLabel("Server URL:"), 0, 0)
-        login_layout.addWidget(self.url_input, 0, 1)
-        login_layout.addWidget(QLabel("Username:"), 1, 0)
-        login_layout.addWidget(self.username_input, 1, 1)
-        login_layout.addWidget(QLabel("Password:"), 2, 0)
-        login_layout.addWidget(self.password_input, 2, 1)
-        login_layout.addWidget(self.login_button, 3, 0)
-        login_layout.addWidget(self.save_credentials, 3, 1)
-        login_box.setLayout(login_layout)
-        login_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        top_layout.addWidget(login_box, 1)
+        form_layout.addWidget(self.save_credentials)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        self.login_button = QPushButton("Login")
+        self.login_button.setDefault(True)
+        self.login_button.clicked.connect(self.login)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(self.login_button)
+        buttons.addWidget(cancel_button)
+        form_layout.addLayout(buttons)
+
+        self._busy_widget = QWidget()
+        busy_layout = QVBoxLayout(self._busy_widget)
+        busy_layout.setContentsMargins(24, 24, 24, 24)
+        self._busy_label = QLabel("Logging in…")
+        self._busy_label.setAlignment(Qt.AlignCenter)
+        busy_layout.addWidget(self._busy_label)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        busy_layout.addWidget(self.progress_bar)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._form_widget)
+        self._stack.addWidget(self._busy_widget)
+        layout.addWidget(self._stack)
+
+        if self.settings.value("auth_token", "") and self.url_input.text().strip():
+            self._show_busy()
+            QTimer.singleShot(0, self._try_auto_login)
+        else:
+            self._show_form()
+
+    def _show_busy(self, message="Logging in…"):
+        self._busy_label.setText(message)
+        self._stack.setCurrentWidget(self._busy_widget)
+        self.setFixedSize(340, 130)
+        QApplication.processEvents()
+
+    def _show_form(self):
+        self._stack.setCurrentWidget(self._form_widget)
+        self.setFixedSize(460, 230)
+
+    def _try_auto_login(self):
+        saved_token = self.settings.value("auth_token", "")
+        url = self.url_input.text().strip()
+        if not saved_token or not url:
+            self._show_form()
+            return
+
+        self._show_busy("Logging in…")
+        if kesmis_validate_token(url, saved_token):
+            self.url = url.rstrip("/")
+            self.username = self.username_input.text()
+            self.password = self.password_input.text()
+            self.token = saved_token
+            self.accept()
+            return
+
+        self.settings.remove("auth_token")
+        self._show_form()
+
+    def login(self):
+        if self._login_in_progress:
+            return
+
+        url = self.url_input.text().strip()
+        username = self.username_input.text()
+        password = self.password_input.text()
+        if not url or not username or not password:
+            QMessageBox.critical(self, "Input Error", "Please provide server URL, username, and password.")
+            return
+
+        self._login_in_progress = True
+        self.login_button.setEnabled(False)
+        self._show_busy("Logging in…")
+
+        try:
+            token, error = kesmis_sign_in(url, username, password)
+            if error:
+                self._show_form()
+                QMessageBox.critical(self, "Login Error", error)
+                return
+
+            self.url = url.rstrip("/")
+            self.username = username
+            self.password = password
+            self.token = token
+
+            if self.save_credentials.isChecked():
+                self.settings.setValue("url", self.url)
+                self.settings.setValue("username", username)
+                self.settings.setValue("password", password)
+                self.settings.setValue("auth_token", token)
+            else:
+                self.settings.remove("auth_token")
+
+            self.accept()
+        finally:
+            self._login_in_progress = False
+            self.login_button.setEnabled(True)
+
+
+class KesMISDialog(QDialog, CollapsibleHelpMixin):
+    def __init__(self, parent=None, server_url="", username="", token=None):
+        super().__init__(parent)
+        configure_qgis_dialog(self, parent)
+        self.setWindowTitle("Export data to KeSMIS")
+        resize_dialog_to_screen(self, min_width=720, min_height=600, max_width=960, max_height=800)
+
+        # Initialize variables
+        self.server_url = server_url.rstrip("/")
+        self.username = username
+        self.token = token
+        self.api_entities = []
+        self.field_mapping = {}
+        self.pcode_fields = ["settlement_id", "ward_id", "subcounty_id", "county_id"]
+        self.is_logged_in = bool(self.token)
+        self.settings = QSettings("YourOrganization", "KesMIS")
+        self.valid_feature_indices = []
+        self.gdf = None
+        self._full_table_data = []
+
+        # Main widget and layout
+        main_widget = QWidget()
+        main_layout = QVBoxLayout(main_widget)
+
+        connection_box = QGroupBox("Server")
+        connection_layout = QHBoxLayout()
+        self.connection_label = QLabel()
+        self.connection_label.setWordWrap(True)
+        connection_layout.addWidget(self.connection_label, 1)
+        self.logout_button = QPushButton("Logout")
+        self.logout_button.setToolTip("Sign out and close this dialog")
+        self.logout_button.clicked.connect(self._logout)
+        connection_layout.addWidget(self.logout_button)
+        connection_box.setLayout(connection_layout)
+        main_layout.addWidget(connection_box)
 
         # Layer and Parent Selection
         layer_box = QGroupBox("Layer and Parent Selection")
@@ -1007,9 +1183,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         layer_layout.addLayout(entity_selection_layout)
         layer_box.setLayout(layer_layout)
         layer_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        top_layout.addWidget(layer_box, 1)
-
-        # Field Mapping Table
+        main_layout.addWidget(layer_box)
         mapping_box = QGroupBox("Field Mapping")
         mapping_layout = QVBoxLayout()
         search_layout = QHBoxLayout()
@@ -1079,8 +1253,6 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         log_layout.addLayout(log_actions)
         log_box.setLayout(log_layout)
 
-        # Add to main layout
-        main_layout.addLayout(top_layout)
         main_layout.addWidget(mapping_box)
         main_layout.addWidget(self.progress_bar)
         main_layout.addWidget(log_box)
@@ -1102,13 +1274,27 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.thread = QThread()
         self.worker = None
         self.field_matching_worker = None
-        
-        # Try auto-login if we have a saved token
-        if self.token:
-            QTimer.singleShot(100, self.auto_login_with_token)
-        else:
-            self.populate_settlement_layers()
-            self._update_code_guidance()
+        self._setup_after_login()
+
+    def _setup_after_login(self):
+        """Populate the import dialog after a successful KeSMIS login."""
+        self.connection_label.setText(f"Connected to {self.server_url} as {self.username}")
+        self.log_message(f"Logged in to {self.server_url} as {self.username}")
+        self.populate_settlement_layers()
+        self.populate_layers()
+        self.fetch_entities(self.server_url)
+        self.layer_combo.setEnabled(True)
+        self.parent_combo.setEnabled(True)
+        self.entity_combo.setEnabled(True)
+        self._update_code_guidance()
+
+    def _logout(self):
+        """Sign out of KeSMIS and close the import dialog."""
+        self.token = None
+        self.is_logged_in = False
+        self.settings.remove("auth_token")
+        self.log_message(f"Logged out from {self.server_url}")
+        self.reject()
 
     @staticmethod
     def _help_html():
@@ -1118,8 +1304,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         <h4>Quick start</h4>
         <ol>
+            <li><b>Server login</b> &mdash; enter the KeSMIS URL, username, and password when prompted.</li>
             <li><b>Settlement codes</b> &mdash; choose the settlement layer, click <b>Sync Settlement Codes from KeSMIS</b>, review the matches, then transfer codes.</li>
-            <li><b>Server Login</b> &mdash; enter the KeSMIS URL, username, and password, then click <b>Login</b>.</li>
             <li><b>Select Layer</b> &mdash; choose the QGIS vector layer to export.</li>
             <li><b>Parent entity</b> &mdash; pick <code>settlement</code> or <code>ward</code> for spatial matching.</li>
             <li><b>Select Entity</b> &mdash; choose the API entity/model to submit to.</li>
@@ -1811,7 +1997,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.sync_settlement_codes_button.setEnabled(False)
         QApplication.processEvents()
 
-        url = self.url_input.text().rstrip("/")
+        url = self.server_url
         headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
         try:
             settlements_gdf = self._fetch_kesmis_settlements_gdf(url, headers)
@@ -2055,7 +2241,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.worker = Worker(
             self.layer_combo.currentData(),
             self.parent_combo.currentText(),
-            self.url_input.text(),
+            self.server_url,
             self.token
         )
         self.worker.local_fallback_filepath = fallback_filepath
@@ -2088,178 +2274,6 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.thread.quit()
         self.thread.wait()
         self.worker = None
-
-    def login_to_server(self):
-        """Login to the server and get token with an indeterminate progress bar."""
-        try:
-            if hasattr(self, '_login_in_progress') and self._login_in_progress:
-                self.log_message("Login already in progress. Please wait.")
-                return
-
-            self._login_in_progress = True
-            self.log_message("Initiating login…")
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setRange(0, 0)  # Set indeterminate mode
-            self.login_button.setEnabled(False)  # Disable login button
-            QApplication.processEvents()  # Ensure UI updates immediately
-
-            url = self.url_input.text().rstrip('/')
-            username = self.username_input.text()
-            password = self.password_input.text()
-
-            # Validate inputs
-            if not url or not username or not password:
-                self.log_message("Login failed: URL, username, and password are required.")
-                QMessageBox.critical(self, "Input Error", "Please provide server URL, username, and password.")
-                return
-
-            if not url.startswith(("http://", "https://")):
-                self.log_message("Login failed: Invalid server URL format.")
-                QMessageBox.critical(self, "Input Error", "Server URL must start with http:// or https://")
-                return
-
-            self.log_message("Contacting server…")
-            login_url = f"{url}/api/auth/signin"
-            try:
-                response = requests.post(
-                    login_url,
-                    json={"username": username, "password": password},
-                    timeout=10  # 10-second timeout
-                )
-                response.raise_for_status()  # Raise exception for bad status codes
-            except requests.Timeout:
-                self.log_message("Login failed: Server did not respond within 10 seconds.")
-                QMessageBox.critical(self, "Timeout Error", "The server did not respond. Please check the URL and try again.")
-                return
-            except requests.ConnectionError:
-                self.log_message("Login failed: Could not connect to the server.")
-                QMessageBox.critical(self, "Connection Error", "Could not connect to the server. Please check your network and URL.")
-                return
-            except requests.HTTPError as e:
-                self.log_message(f"Login failed: Server error - {str(e)}")
-                QMessageBox.critical(self, "Server Error", f"Server returned an error: {str(e)}")
-                return
-
-            self.log_message("Validating credentials…")
-            if response.status_code == 200:
-                data = response.json()
-                self.token = data.get("data")
-                if not self.token:
-                    self.token = None
-                    self.settings.remove("auth_token")
-                    self.log_message("Login failed: No token received from server.")
-                    QMessageBox.critical(self, "Login Error", "Login failed: No token received from server.")
-                    return
-
-                self.is_logged_in = True
-                self.log_message(f"Login successful for user '{username}'")
-
-                # Save credentials and token if checked
-                if self.save_credentials.isChecked():
-                    self.save_credentials_to_settings()
-                    self.settings.setValue("auth_token", self.token)
-                else:
-                    # Clear token if save credentials is not checked
-                    self.settings.remove("auth_token")
-
-                # Update UI
-                self.log_message("Populating layers…")
-                self.populate_layers()
-                self.log_message("Fetching entities…")
-                self.fetch_entities(url)
-                self.layer_combo.setEnabled(True)
-                self.parent_combo.setEnabled(True)
-                self.entity_combo.setEnabled(True)
-                self.log_message("Login successful!")
-            else:
-                self.is_logged_in = False
-                self.token = None
-                self.settings.remove("auth_token")
-                self.log_message(f"Login failed: {response.text}")
-                QMessageBox.critical(self, "Login Error", f"Login failed: {response.text}")
-
-        except Exception as e:
-            self.is_logged_in = False
-            self.token = None
-            self.settings.remove("auth_token")
-            self.log_message(f"Unexpected login error: {str(e)}")
-            QMessageBox.critical(self, "Error", f"An unexpected error occurred: {str(e)}")
-
-        finally:
-            self._login_in_progress = False
-            self.progress_bar.setRange(0, 100)  # Reset to determinate mode
-            self.progress_bar.setValue(0)
-            self.progress_bar.setVisible(False)
-            self.login_button.setEnabled(True)
-
-    def on_save_credentials_changed(self, state):
-        """Handle checkbox state change for saving credentials."""
-        if state == 2 and self.is_logged_in:
-            # Save credentials and token
-            self.save_credentials_to_settings()
-            if self.token:
-                self.settings.setValue("auth_token", self.token)
-        elif state == 0:
-            # Unchecked - clear saved token but keep credentials
-            self.settings.remove("auth_token")
-
-    def save_credentials_to_settings(self):
-        """Save the entered credentials to QSettings."""
-        url = self.url_input.text()
-        username = self.username_input.text()
-        password = self.password_input.text()
-
-        self.settings.setValue("url", url)
-        self.settings.setValue("username", username)
-        self.settings.setValue("password", password)
-
-        self.log_message(f"Credentials saved successfully: URL={url}, Username={username}")
-    
-    def auto_login_with_token(self):
-        """Attempt to auto-login using saved token."""
-        if not self.token:
-            return
-        
-        url = self.url_input.text().rstrip('/')
-        if not url:
-            return
-        
-        try:
-            self.log_message("Attempting auto-login with saved token...")
-            headers = {
-                "Authorization": f"Bearer {self.token}",
-                "x-access-token": self.token
-            }
-            # Test token validity by making a simple API call
-            response = requests.get(
-                f"{url}/api/v1/models/list",
-                headers=headers,
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                # Token is valid
-                self.is_logged_in = True
-                self.log_message("Auto-login successful with saved token")
-                
-                # Populate UI
-                self.populate_layers()
-                self.fetch_entities(url)
-                self.layer_combo.setEnabled(True)
-                self.parent_combo.setEnabled(True)
-                self.entity_combo.setEnabled(True)
-            else:
-                # Token is invalid, clear it
-                self.log_message("Saved token is invalid or expired. Please login again.")
-                self.token = None
-                self.settings.remove("auth_token")
-                self.is_logged_in = False
-        except Exception as e:
-            # Connection error or other issue
-            self.log_message(f"Auto-login failed: {str(e)}. Please login manually.")
-            self.token = None
-            self.settings.remove("auth_token")
-            self.is_logged_in = False
 
     def populate_settlement_layers(self):
         """Populate settlement layer dropdown without auto-selecting a layer."""
@@ -2474,7 +2488,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         """Submit features to API in batches of 100 with progress updates."""
         try:
             layer = self.layer_combo.currentData()
-            url = self.url_input.text()
+            url = self.server_url
             entity = self.entity_combo.currentData()
 
             # Validate GeoDataFrame

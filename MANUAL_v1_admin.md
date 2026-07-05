@@ -20,7 +20,7 @@
 | **Import**      | Upload QGIS vector features to a KeSMIS server                         |
 
 
-Each dialog includes a collapsible **Help** panel. Click **« Show Help** to open it.
+Each dialog includes a collapsible **Help** panel. The QA/QC dialog opens with help visible; other tools show **« Show Help** to open it.
 
 ![QGIS menu and toolbar](screenshots/figure1.png)
 
@@ -232,13 +232,14 @@ Run quality checks on File Geodatabase layers and export issue layers, spreadshe
 
 ### Steps
 
-1. Open **Plugins → Connector for ODK → QA/QC**.
-2. Click **Select GeoDatabase** and choose the folder containing your `.gdb`.
-3. Click **Select Output Folder** for reports and issue layers.
-4. Adjust **parameters** if needed (angle and length thresholds).
-5. Under **Select Layers**, tick the layers to check, or use **Select All**.
-6. Click **Run All Checks**.
-7. When finished, use the **PDF Report** and **Open Output Folder** links below the log.
+1. Open **Plugins → Connector for ODK → QA/QC**. The dialog opens with the help panel visible.
+2. From **Quick start** step 2 in the help panel, download the **template geodatabase** and **dictionary.xlsx** for reference when aligning your data (see below).
+3. Click **Select GeoDatabase** and choose the folder containing your `.gdb`. Use the template to structure new submissions.
+4. Click **Select Output Folder** for reports and issue layers.
+5. Adjust **parameters** if needed (angle and length thresholds).
+6. Under **Select Layers**, tick the layers to check, or use **Select All**. The layer list scrolls inside a fixed panel so **Run All Checks** stays visible.
+7. Click **Run All Checks**.
+8. When finished, use the **PDF Report** and **Open Output Folder** links below the log.
 
 ![QA/QC interface](screenshots/figure12a.png)
 
@@ -271,13 +272,18 @@ Run quality checks on File Geodatabase layers and export issue layers, spreadshe
 
 *Figure 14 — Completed run with report and output folder links*
 
-### Attribute dictionary
+### Template geodatabase and attribute dictionary
 
-`dictionary.xlsx` is bundled with the plugin. Each sheet should match a layer name and include columns **Attribute**, **Type**, and optionally **LEN** and **Options**. You can download a copy from the help panel link inside the QA/QC dialog.
+The template geodatabase and attribute dictionary are **reference materials** for packaging and QA/QC. They describe the expected layer names, fields, types, and geometry so your `.gdb` aligns with the real submission structure. Download copies from **Quick start** step 2 in the QA/QC help panel.
+
+1. **Download template geodatabase** — shows the expected layer layout. Use it as a guide when building or checking your geodatabase.
+2. **Download dictionary.xlsx** — lists the field names, types, and geometry for each layer. Open the **How to** sheet for column definitions; every other sheet describes one layer.
+3. **Using both together** — consultants use the template and dictionary as reference when packaging data so layers and attributes match what QA/QC expects.
+4. **Help panel downloads** — links open a save dialog without clearing the help text.
 
 ![QA/QC help panel](screenshots/figure13.png)
 
-*Figure 15 — Help panel showing dictionary download link*
+*Figure 15 — Help panel showing template geodatabase and dictionary download links*
 
 ### Outputs
 
@@ -291,30 +297,79 @@ For each layer and issue type, `.gpkg` and `.xlsx` files are written to the outp
 
 ## 7. Import (KeSMIS)
 
-Upload QGIS vector layer features to a KeSMIS server with automatic field mapping.
+Upload QGIS vector layer features to a KeSMIS server with automatic field mapping and parent-entity assignment.
 
-![Import dialog](screenshots/figure10.png)
+### KeSMIS login
 
-*Figure 17 — Import dialog with layer, entity, and field mapping*
+When you open **Import**, a **KeSMIS Login** popup appears first. You must enter the **server URL**, **username**, and **password** and click **Login** before the main import dialog opens. Click **Cancel** to abort.
 
-### Steps
+- **Save credentials** stores your URL, username, password, and session token for next time.
+- If a saved token is still valid, the popup shows **Logging in…** with a progress bar and opens the import dialog automatically.
+- If the token has expired, the full login form is shown so you can sign in again.
 
-1. **Populate code in loaded layers** — Load your vector layer(s) in QGIS, open **Plugins → Connector for ODK → Import**, click **Populate Code in Selected Layers**, tick the layers to update, and click **Run**. A message confirms success or reports any skipped layers (see Figure 18). Layers need a `code` column for pcode matching.
+![KeSMIS Login](screenshots/figure10a-login.png)
 
-![Populate Code dialog](screenshots/figure11.png)
+*Figure 17 — KeSMIS Login popup*
 
-*Figure 18 — Layer selection dialog for Populate Code*
+![Import dialog after login](screenshots/figure10b--afterlogin.png)
 
-2. **Server Login** — enter the KeSMIS URL, username, and password, then click **Login**.
-3. **Select Layer** — choose the QGIS vector layer to export.
-4. **Select Parent Entity** — choose `settlement` or `ward` for spatial matching.
-5. **Select Entity** — choose the API entity/model to submit to.
-6. Review the **Field Mapping** table (see Figure 17). Use the filter box to search fields and adjust API field selections if needed.
-7. Click **Submit Data to KeSMIS**.
+*Figure 18 — Import dialog after login (Server status, Logout, layer selection, field mapping)*
+
+### Overview
+
+After login, the import dialog is organized top to bottom:
+
+1. **Server** — shows `Connected to {url} as {username}`. Click **Logout** to sign out and close the dialog (clears the saved session token).
+2. **Settlement codes** (recommended first) — sync official KeSMIS codes into settlement layers before upload.
+3. **Select Layer** — choose the vector layer to export (starts empty until you pick one).
+4. **Select Parent Entity** — choose `settlement` or `ward` for spatial parent matching.
+5. **Select Entity** — choose the API model to submit to; field matching runs after you confirm your choice.
+6. **Field Mapping** — review or adjust automatic field matches, then submit.
+
+Plugin dialogs stay scoped to the QGIS window and do not float over other applications.
+
+### Settlement codes (recommended first step)
+
+If your upload layer is a **settlement layer** (layer name contains `settlement`, excluding reference layers ending in ` Boundaries`), use KeSMIS codes — do not generate random UUIDs. Each settlement feature needs the **same `code` as KeSMIS** so imports **update existing records** instead of creating **duplicate settlements** on the server.
+
+1. Open **Plugins → Connector for ODK → Import** and complete the **KeSMIS Login** popup.
+2. Under **Select Settlement Layer**, choose your settlement layer from the dropdown (nothing is pre-selected).
+3. Click **Sync Settlement Codes from KeSMIS**. This matches your local features to official KeSMIS settlements by geometry and copies the server `code` onto your layer. Using those codes on import prevents duplicate settlement records when the same place already exists in KeSMIS.
+4. Review the **Review Settlement Matches** table:
+   - **One KeSMIS match** — the best overlap is selected automatically.
+   - **Multiple KeSMIS matches** — choose the correct settlement from the dropdown for that row.
+   - **No intersection** — a new short code is generated and shown before you confirm; you can proceed with that code.
+5. Click **Transfer Codes** to apply codes to the layer.
+
+After a successful sync, features are marked in the `kesmis_sync` field and syncing is disabled for that layer to protect official codes. To re-sync, remove the `kesmis_sync` field from the layer first.
+
+### Upload workflow
+
+1. Complete **KeSMIS Login** when the popup appears (see above).
+2. **Select Layer** — choose the QGIS vector layer to export. The dropdown starts on **— Select layer —**; pick a layer explicitly.
+3. **Code field check** — when you select a layer:
+   - If the layer **already has a `code` field**, loading continues normally.
+   - If the layer **has no `code` field** (and is not a settlement layer), you are prompted to **generate unique codes**. Choose **Yes** to add/fill codes, or **No** to cancel — import cannot continue without a `code` field.
+   - If the selected layer **looks like a settlement layer**, you are directed to use **Sync Settlement Codes from KeSMIS** instead of generating random codes.
+4. **Select Parent Entity** — choose `settlement` or `ward`. When prompted, download fresh parent boundaries from the server (recommended) or use a cached local GeoJSON file.
+5. **Select Entity** — search or browse the entity list, then **click your choice** (or press Enter). Field matching starts only after you confirm the entity — browsing the list does not start matching early.
+6. Review the **Field Mapping** table. Use the filter box to search rows. In each **API Field** cell:
+   - Open the dropdown to see the **full list** of API fields (even when a match already exists).
+   - Type to filter the list, or type a custom API field name if needed.
+   - Choose **-** to clear a mapping.
+7. **Dry run (optional)** — enable **Dry Run (Test Mode)** and set how many records to validate. Click **Validate on KeSMIS** to send a test batch with `dryRun: true`. Nothing is saved; the summary shows what would be inserted, updated, or failed, and any errors are listed in the dialog.
+8. **Submit** — disable dry run and click **Submit Data to KeSMIS** for the full upload.
+
+To sign out, click **Logout** in the **Server** section. The import dialog closes and the saved session token is cleared; open **Import** again to log in.
 
 ### Dry run
 
-Enable **Dry Run (Test Mode)** to submit only a limited number of records before a full upload. Set the record count in the spin box next to the checkbox.
+Enable **Dry Run (Test Mode)** to validate a limited number of records on the server **without saving anything**. Set the record count in the spin box next to the checkbox.
+
+- The plugin sends `dryRun: true` to the KeSMIS import API.
+- The server returns the same style of counts as a real import (`insertedCount`, `updatedCount`, `failedCount`).
+- If any records fail validation, errors are shown in the **Dry Run Complete** dialog as well as in the log.
+- When you are satisfied with the dry run, turn off dry run and submit for real.
 
 ---
 
@@ -325,10 +380,15 @@ Enable **Dry Run (Test Mode)** to submit only a limited number of records before
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
 | Plugin does not appear after install | Restart QGIS. Check **Plugins → Manage and Install Plugins → Installed** that Connector for ODK is enabled. |
 | Package install fails                | See **Fixing a missing package error** in Section 2.2. Close QGIS, open **OSGeo4W Shell** from your QGIS installation folder, install the missing package (or all packages), then restart QGIS. |
-| ODK / KeSMIS login fails             | Confirm URL, username, and password. Check network access to the server.                                    |
-| Import missing `code` field          | Use **Populate Code in Selected Layers** before submitting.                                                 |
+| ODK / KeSMIS login fails             | Confirm URL, username, and password in the **KeSMIS Login** popup. Check network access to the server. |
+| KeSMIS session expired               | Open **Import** again and sign in. If auto-login fails, enter credentials manually. Use **Logout** to clear a stale session. |
+| Import missing `code` field          | When you select a layer, choose **Yes** when prompted to generate codes. Settlement layers must use **Sync Settlement Codes from KeSMIS**, not random UUIDs. |
+| Settlement codes wrong or missing    | Use **Select Settlement Layer** and **Sync Settlement Codes from KeSMIS** before upload. Pick the correct KeSMIS match when several overlap. |
+| Field matching starts too early      | Finish selecting an entity by **clicking** it in the list (or pressing Enter). Browsing with arrow keys alone does not run matching. |
+| API field dropdown looks empty       | Clear the search text in the cell, or click the dropdown arrow to reopen the full list. Matched fields still show all options when opened. |
+| Dry run still saves data             | Ensure the KeSMIS server supports `dryRun: true` on `/api/v1/data/import/upsert`. The plugin sends dry run only when **Dry Run** is checked. |
 | QA/QC attribute check skipped        | Ensure `dictionary.xlsx` has a sheet matching the layer name.                                               |
-| No layers in a dropdown              | Load vector layers into the QGIS project first.                                                             |
+| No layers in a dropdown              | Load vector layers into the QGIS project first. Layer and settlement dropdowns start empty until you choose one. |
 
 
 For updates, bug reports, and source code:
@@ -357,10 +417,10 @@ For updates, bug reports, and source code:
 | 12     | `figure15.png`                  | Split Layer dialog                            |
 | 13     | `figure12a.png`                 | QA/QC — interface                             |
 | 14     | `figure12b.png`                 | QA/QC — finished                              |
-| 15     | `figure13.png`                  | QA/QC help + dictionary link                  |
+| 15     | `figure13.png`                  | QA/QC help + template & dictionary links      |
 | 16     | `figure14.png`                  | Output folder contents                        |
-| 17     | `figure10.png`                  | Import — main dialog (includes field mapping) |
-| 18     | `figure11.png`                  | Populate Code layer picker                    |
+| 17     | `figure10a-login.png`           | KeSMIS Login popup                            |
+| 18     | `figure10b--afterlogin.png`    | Import — main dialog after login              |
 
 
 ---

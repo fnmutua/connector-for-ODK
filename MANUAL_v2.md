@@ -19,7 +19,7 @@
 | **QA/QC**       | Run quality checks on File Geodatabase layers and export issue reports |
 
 
-Each dialog includes a collapsible **Help** panel. Click **« Show Help** to open it.
+Each dialog includes a collapsible **Help** panel. The QA/QC dialog opens with help visible; other tools show **« Show Help** to open it.
 
 ![QGIS menu and toolbar](screenshots/figure1.png)
 
@@ -50,7 +50,7 @@ The plugin installs missing packages automatically the first time it loads. If t
 Run this command in that shell:
 
 ```
-python -m pip install numpy pandas geopandas fiona shapely pyproj fpdf2 requests fuzzywuzzy openpyxl xlsxwriter
+python -m pip install numpy pandas geopandas fiona shapely pyproj fpdf2 requests fuzzywuzzy rapidfuzz shortuuid openpyxl xlsxwriter
 ```
 
 Required packages:
@@ -67,6 +67,8 @@ Required packages:
 | `fpdf2`      | QA/QC PDF reports (`import fpdf`)  |
 | `requests`   | ODK Central API calls              |
 | `fuzzywuzzy` | Fuzzy field and attribute matching |
+| `rapidfuzz`  | Fast field matching (plugin load)  |
+| `shortuuid`  | Unique ID generation (plugin load) |
 | `openpyxl`   | Reading `dictionary.xlsx` (QA/QC)  |
 | `xlsxwriter` | Writing QA/QC Excel outputs        |
 
@@ -97,13 +99,13 @@ Click **View message log** (or open **View → Panels → Log Messages → Pytho
 4. Install the missing package. You can install **all** required packages (recommended):
 
 ```
-python -m pip install numpy pandas geopandas fiona shapely pyproj fpdf2 requests fuzzywuzzy openpyxl xlsxwriter
+python -m pip install numpy pandas geopandas fiona shapely pyproj fpdf2 requests fuzzywuzzy rapidfuzz shortuuid openpyxl xlsxwriter
 ```
 
-   Or install **only the missing package** (replace `fpdf2` with the name from your error):
+   Or install **only the missing package** (replace `shortuuid` with the name from your error):
 
 ```
-python -m pip install fpdf2
+python -m pip install shortuuid
 ```
 
 5. **Restart QGIS**. Connector for ODK should load without the error.
@@ -228,13 +230,14 @@ Run quality checks on File Geodatabase layers and export issue layers, spreadshe
 
 ### Steps
 
-1. Open **Plugins → Connector for ODK → QA/QC**.
-2. Click **Select GeoDatabase** and choose the folder containing your `.gdb`.
-3. Click **Select Output Folder** for reports and issue layers.
-4. Adjust **parameters** if needed (angle and length thresholds).
-5. Under **Select Layers**, tick the layers to check, or use **Select All**.
-6. Click **Run All Checks**.
-7. When finished, use the **PDF Report** and **Open Output Folder** links below the log.
+1. Open **Plugins → Connector for ODK → QA/QC**. The dialog opens with the help panel visible.
+2. From **Quick start** step 2 in the help panel, download the **template geodatabase** and **dictionary.xlsx** for reference when aligning your data (see below).
+3. Click **Select GeoDatabase** and choose the folder containing your `.gdb`. Use the template to structure new submissions.
+4. Click **Select Output Folder** for reports and issue layers.
+5. Adjust **parameters** if needed (angle and length thresholds).
+6. Under **Select Layers**, tick the layers to check, or use **Select All**. The layer list scrolls inside a fixed panel so **Run All Checks** stays visible.
+7. Click **Run All Checks**.
+8. When finished, use the **PDF Report** and **Open Output Folder** links below the log.
 
 ![QA/QC interface](screenshots/figure12a.png)
 
@@ -267,13 +270,18 @@ Run quality checks on File Geodatabase layers and export issue layers, spreadshe
 
 *Figure 14 — Completed run with report and output folder links*
 
-### Attribute dictionary
+### Template geodatabase and attribute dictionary
 
-`dictionary.xlsx` is bundled with the plugin. Each sheet should match a layer name and include columns **Attribute**, **Type**, and optionally **LEN** and **Options**. You can download a copy from the help panel link inside the QA/QC dialog.
+The template geodatabase and attribute dictionary are **reference materials** for packaging and QA/QC. They describe the expected layer names, fields, types, and geometry so your `.gdb` aligns with the real submission structure. Download copies from **Quick start** step 2 in the QA/QC help panel.
+
+1. **Download template geodatabase** — shows the expected layer layout. Use it as a guide when building or checking your geodatabase.
+2. **Download dictionary.xlsx** — lists the field names, types, and geometry for each layer. Open the **How to** sheet for column definitions; every other sheet describes one layer.
+3. **Using both together** — consultants use the template and dictionary as reference when packaging data so layers and attributes match what QA/QC expects.
+4. **Help panel downloads** — links open a save dialog without clearing the help text.
 
 ![QA/QC help panel](screenshots/figure13.png)
 
-*Figure 15 — Help panel showing dictionary download link*
+*Figure 15 — Help panel showing template geodatabase and dictionary download links*
 
 ### Outputs
 
@@ -293,7 +301,8 @@ For each layer and issue type, `.gpkg` and `.xlsx` files are written to the outp
 | Plugin does not appear after install | Restart QGIS. Check **Plugins → Manage and Install Plugins → Installed** that Connector for ODK is enabled. |
 | Package install fails                | See **Fixing a missing package error** in Section 2.2. Close QGIS, open **OSGeo4W Shell** from your QGIS installation folder, install the missing package (or all packages), then restart QGIS. |
 | ODK login fails                      | Confirm URL, username, and password. Check network access to ODK Central.                                   |
-| QA/QC attribute check skipped        | Ensure `dictionary.xlsx` has a sheet matching the layer name.                                               |
+| QA/QC attribute check skipped        | Ensure `dictionary.xlsx` has a sheet matching the layer name. Open the **How to** sheet in the dictionary for layer and field definitions. |
+| Help panel text disappears after a download link | Reload the plugin if this happens on an older build; current versions keep the help text visible. |
 | No layers in a dropdown              | Load vector layers into the QGIS project first.                                                             |
 
 
@@ -323,7 +332,7 @@ For updates, bug reports, and source code:
 | 12     | `figure15.png`                  | Split Layer dialog                            |
 | 13     | `figure12a.png`                 | QA/QC — interface                             |
 | 14     | `figure12b.png`                 | QA/QC — finished                              |
-| 15     | `figure13.png`                  | QA/QC help + dictionary link                  |
+| 15     | `figure13.png`                  | QA/QC help + template & dictionary links      |
 | 16     | `figure14.png`                  | Output folder contents                        |
 
 

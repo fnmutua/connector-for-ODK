@@ -6,13 +6,13 @@ import requests
 import os
 from .split_layer_dialog import SplitLayerDialog  # Import the new SplitLayerDialog
 from .resources import *
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QMessageBox, QDialog
 import os
 import sys
 import subprocess
 
 from .qaqc import ProcessGDBDialog  # Import the new SplitLayerDialog
-from .upload import KesMISDialog  # Import the new SplitLayerDialog
+from .upload import KesMISDialog, KesMISLoginDialog  # Import the new SplitLayerDialog
 from qgis.utils import iface
 
 
@@ -68,7 +68,15 @@ class ConnectODK:
 
     def open_kesmis_dialog(self):
             """Open the Import dialog."""
-            dialog = KesMISDialog(self.iface.mainWindow())
+            login = KesMISLoginDialog(self.iface.mainWindow())
+            if login.exec_() != QDialog.Accepted:
+                return
+            dialog = KesMISDialog(
+                self.iface.mainWindow(),
+                server_url=login.url,
+                username=login.username,
+                token=login.token,
+            )
             dialog.exec_()
 
 
