@@ -62,7 +62,7 @@ except Exception as e:
 
 # List all layers in the GDB
 layer_count = gdb.GetLayerCount()
-    print(f"Found {layer_count} layers in geodatabase")
+print(f"Found {layer_count} layers in geodatabase")
 
 for i in range(layer_count):
     layer = gdb.GetLayerByIndex(i)
