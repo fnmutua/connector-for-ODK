@@ -214,3 +214,16 @@ man_pages = [
     ('index', 'TemplateClass', u'ConnectODK Documentation',
      [u'Felix Mutua'], 1)
 ]
+
+
+def _remove_buildinfo(app, exc):
+    """Drop Sphinx .buildinfo hashes from packaged plugin help."""
+    if exc is not None:
+        return
+    buildinfo = os.path.join(app.outdir, '.buildinfo')
+    if os.path.isfile(buildinfo):
+        os.remove(buildinfo)
+
+
+def setup(app):
+    app.connect('build-finished', _remove_buildinfo)

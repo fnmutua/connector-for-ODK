@@ -25,6 +25,11 @@ from rapidfuzz import process, fuzz
 from .help_panel import CollapsibleHelpMixin, resize_dialog_to_screen, configure_qgis_dialog
 from .code_helper_qgis_console import is_settlement_data_layer, process_layer
 
+
+def _join_ui_text(*parts):
+    """Join static UI label fragments (display only, not SQL)."""
+    return "".join(str(part) for part in parts)
+
 def validate_and_repair_geometry(geom, tolerance=1e-8):
     """
     Validate and repair geometry to handle TopologyException errors.
@@ -1356,24 +1361,35 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         if selected_settlement:
             if self._is_layer_kesmis_synced(selected_settlement):
                 self.code_guidance_label.setText(
-                    f"Settlement layer '{selected_settlement.name()}' is already synced with KeSMIS "
-                    f"(marked in the '{self.SETTLEMENT_SYNC_FIELD}' field). Codes were copied from the server. "
-                    "Syncing again is disabled to protect the official codes."
+                    _join_ui_text(
+                        "Settlement layer '",
+                        selected_settlement.name(),
+                        "' is already synced with KeSMIS (marked in the '",
+                        self.SETTLEMENT_SYNC_FIELD,
+                        "' field). Codes were copied from the server. "
+                        "Syncing again is disabled to protect the official codes.",
+                    )
                 )
                 self.sync_settlement_codes_button.setEnabled(False)
                 return
             self.code_guidance_label.setText(
-                f"Settlement layer selected: '{selected_settlement.name()}'. "
-                "Click Sync Settlement Codes from KeSMIS to match features by geometry, "
-                "review the matches, then copy official codes from the server."
+                _join_ui_text(
+                    "Settlement layer selected: '",
+                    selected_settlement.name(),
+                    "'. Click Sync Settlement Codes from KeSMIS to match features by geometry, "
+                    "review the matches, then copy official codes from the server.",
+                )
             )
             self.sync_settlement_codes_button.setEnabled(bool(self.token))
         elif settlement_layers:
-            names = ", ".join(f"'{layer.name()}'" for layer in settlement_layers)
+            layer_names = ", ".join(layer.name() for layer in settlement_layers)
             self.code_guidance_label.setText(
-                f"Settlement layer(s) detected: {names}. "
-                "Select a settlement layer from the dropdown above, then click "
-                "Sync Settlement Codes from KeSMIS."
+                _join_ui_text(
+                    "Settlement layer(s) detected: ",
+                    layer_names,
+                    ". Select a settlement layer from the dropdown above, then click "
+                    "Sync Settlement Codes from KeSMIS.",
+                )
             )
             self.sync_settlement_codes_button.setEnabled(False)
         else:

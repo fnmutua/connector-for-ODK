@@ -6,7 +6,7 @@
 name=Connector for ODK
 qgisMinimumVersion=3.0
 description=Connect to ODK Central, split layers, run QA/QC on File Geodatabases, and upload vector data to KeSMIS — with in-app help on every tool.
-version=2.1.1
+version=2.1.2
 author=Felix Mutua
 email=mutua@ags.co.ke
 
@@ -19,7 +19,7 @@ repository=https://github.com/fnmutua/connector-for-ODK
 # Recommended items:
 
 hasProcessingProvider=no
-changelog=Version 2.1.1: Bundled template geodatabase. KeSMIS login, settlement sync, import dry run, QA/QC improvements.
+changelog=Version 2.1.2: Bundled template geodatabase. KeSMIS login, settlement sync, import dry run, QA/QC improvements.
 
 # Tags are comma separated with spaces allowed
 tags=python, odk, odk central, kesmis, qa, qc, geodatabase, import, export
