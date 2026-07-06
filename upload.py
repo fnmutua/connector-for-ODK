@@ -907,6 +907,39 @@ class FieldMatchingWorker(QObject):
             self.finished.emit()
 
 
+def _parse_kesmis_error_response(response):
+    """Extract a user-facing message from a KeSMIS API error response."""
+    try:
+        body = response.json() if response.content else {}
+    except (ValueError, json.JSONDecodeError):
+        body = {}
+
+    if isinstance(body, dict):
+        message = body.get("message") or body.get("error")
+        if body.get("code") == "DEVICE_LIMIT_REACHED":
+            lines = [
+                message
+                or "Too many active sessions. Sign out on another browser or device, or ask an administrator to clear your sessions."
+            ]
+            devices = body.get("activeDevices") or []
+            if devices:
+                lines.append("")
+                lines.append("Active sessions:")
+                for device in devices:
+                    label = device.get("deviceLabel") or "Unknown device"
+                    ip = device.get("ipAddress")
+                    suffix = f" ({ip})" if ip else ""
+                    lines.append(f"• {label}{suffix}")
+            return "\n".join(lines)
+        if message:
+            return str(message)
+
+    text = (response.text or "").strip()
+    if text and not text.startswith("<"):
+        return text[:500]
+    return f"Login failed (HTTP {response.status_code})."
+
+
 def kesmis_validate_token(url, token):
     """Return True when a saved KeSMIS token is still valid."""
     if not url or not token:
@@ -920,12 +953,12 @@ def kesmis_validate_token(url, token):
 
 
 def kesmis_sign_in(url, username, password):
-    """Sign in to KeSMIS. Returns (token, error_message)."""
+    """Sign in to KeSMIS. Returns (token, error_message, is_device_limit)."""
     url = url.rstrip("/")
     if not url or not username or not password:
-        return None, "URL, username, and password are required."
+        return None, "URL, username, and password are required.", False
     if not url.startswith(("http://", "https://")):
-        return None, "Server URL must start with http:// or https://"
+        return None, "Server URL must start with http:// or https://", False
 
     login_url = f"{url}/api/auth/signin"
     try:
@@ -934,21 +967,27 @@ def kesmis_sign_in(url, username, password):
             json={"username": username, "password": password},
             timeout=10,
         )
-        response.raise_for_status()
     except requests.Timeout:
-        return None, "The server did not respond. Please check the URL and try again."
+        return None, "The server did not respond. Please check the URL and try again.", False
     except requests.ConnectionError:
-        return None, "Could not connect to the server. Please check your network and URL."
-    except requests.HTTPError as e:
-        return None, f"Server returned an error: {e}"
+        return None, "Could not connect to the server. Please check your network and URL.", False
 
-    if response.status_code != 200:
-        return None, response.text or "Login failed."
+    if response.status_code == 200:
+        try:
+            body = response.json()
+        except (ValueError, json.JSONDecodeError):
+            return None, "Login failed: invalid response from server.", False
+        token = body.get("data") or body.get("accessToken")
+        if not token:
+            return None, "Login failed: no token received from server.", False
+        return token, None, False
 
-    token = response.json().get("data")
-    if not token:
-        return None, "Login failed: no token received from server."
-    return token, None
+    try:
+        body = response.json() if response.content else {}
+    except (ValueError, json.JSONDecodeError):
+        body = {}
+    is_device_limit = isinstance(body, dict) and body.get("code") == "DEVICE_LIMIT_REACHED"
+    return None, _parse_kesmis_error_response(response), is_device_limit
 
 
 class KesMISLoginDialog(QDialog):
@@ -1077,10 +1116,13 @@ class KesMISLoginDialog(QDialog):
         self._show_busy("Logging in…")
 
         try:
-            token, error = kesmis_sign_in(url, username, password)
+            token, error, is_device_limit = kesmis_sign_in(url, username, password)
             if error:
                 self._show_form()
-                QMessageBox.critical(self, "Login Error", error)
+                if is_device_limit:
+                    QMessageBox.warning(self, "Too many active sessions", error)
+                else:
+                    QMessageBox.critical(self, "Login Error", error)
                 return
 
             self.url = url.rstrip("/")
