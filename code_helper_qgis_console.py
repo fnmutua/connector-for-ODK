@@ -108,7 +108,7 @@ def process_layer(layer, log=None):
     if is_settlement_data_layer(layer.name()):
         log(
             f"Skipping settlement layer: {layer.name()}. "
-            "Use Sync Settlement Codes from KeSMIS instead of generating UUID codes."
+            "Use Sync Settlements with KeSMIS instead of generating UUID codes."
         )
         return False
 

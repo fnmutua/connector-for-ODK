@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox,
     QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox,
     QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QApplication,
-    QTableWidgetItem, QSizePolicy, QFormLayout, QStackedWidget,
+    QTableWidgetItem, QSizePolicy, QFormLayout, QStackedWidget, QTabWidget,
 )
 from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
 from fuzzywuzzy import fuzz
@@ -940,6 +940,33 @@ def _parse_kesmis_error_response(response):
     return f"Login failed (HTTP {response.status_code})."
 
 
+def _format_import_http_error(response, fallback, format_error_lines=None):
+    """Extract KeSMIS import/upsert error details from an HTTP response."""
+    try:
+        body = response.json() if response.content else {}
+    except (ValueError, json.JSONDecodeError):
+        body = {}
+
+    if isinstance(body, dict):
+        parts = []
+        for key in ("message", "error", "detail"):
+            value = body.get(key)
+            if value:
+                parts.append(str(value))
+        errors = body.get("errors")
+        if errors and format_error_lines:
+            parts.extend(format_error_lines(errors, limit=5))
+        elif errors:
+            parts.append(str(errors)[:800])
+        if parts:
+            return f"HTTP {response.status_code}: " + "\n".join(parts)
+
+    text = (response.text or "").strip()
+    if text and not text.startswith("<"):
+        return f"HTTP {response.status_code}: {text[:800]}"
+    return fallback
+
+
 def kesmis_validate_token(url, token):
     """Return True when a saved KeSMIS token is still valid."""
     if not url or not token:
@@ -1188,11 +1215,11 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.settlement_layer_combo = QComboBox()
         self.settlement_layer_combo.setEnabled(False)
         self.settlement_layer_combo.currentTextChanged.connect(self._update_code_guidance)
-        self.sync_settlement_codes_button = QPushButton("Sync Settlement Codes from KeSMIS")
+        self.sync_settlement_codes_button = QPushButton("Sync Settlements with KeSMIS")
         self.sync_settlement_codes_button.clicked.connect(self.sync_settlement_codes_for_selection)
         self.sync_settlement_codes_button.setEnabled(False)
         self.sync_settlement_codes_button.setToolTip(
-            "Match the selected settlement layer to KeSMIS by geometry, preview matches, then copy codes."
+            "Match the settlement layer to KeSMIS by geometry, map fields, then create or update records on the server."
         )
         settlement_layout.addWidget(QLabel("Select Settlement Layer:"))
         settlement_layout.addWidget(self.settlement_layer_combo, 1)
@@ -1352,7 +1379,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         <h4>Quick start</h4>
         <ol>
             <li><b>Server login</b> &mdash; enter the KeSMIS URL, username, and password when prompted.</li>
-            <li><b>Settlement codes</b> &mdash; choose the settlement layer, click <b>Sync Settlement Codes from KeSMIS</b>, review the matches, then transfer codes.</li>
+            <li><b>Settlement sync</b> &mdash; choose the settlement layer, click <b>Sync Settlements with KeSMIS</b>, review field mapping and geometry matches, then create or update records on the server.</li>
             <li><b>Select Layer</b> &mdash; choose the QGIS vector layer to export.</li>
             <li><b>Parent entity</b> &mdash; pick <code>settlement</code> or <code>ward</code> for spatial matching.</li>
             <li><b>Select Entity</b> &mdash; choose the API entity/model to submit to.</li>
@@ -1367,10 +1394,18 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         <h4>Code column</h4>
         <p>When you select a layer, the plugin checks for a <code>code</code> field. If it is missing on a non-settlement layer, you can allow automatic code generation or cancel.</p>
-        <p><b>Settlement layers:</b> do not generate random codes. Use <b>Sync Settlement Codes from KeSMIS</b> so codes match the server and avoid duplicates on import.</p>
+        <p><b>Settlement layers:</b> do not generate random codes. Use <b>Sync Settlements with KeSMIS</b> to map fields, match by geometry, and create or update settlement records on the server.</p>
         """
 
     SETTLEMENT_SYNC_FIELD = "kesmis_sync"
+    SETTLEMENT_SKIP_LAYER_FIELDS = {
+        "fid", "objectid", "globalid", "ogc_fid",
+        "shape_leng", "shape_length", "shape_area", "perimeter", "area",
+    }
+    SETTLEMENT_SKIP_API_FIELDS = {
+        "id", "geom", "geojson", "geometry", "createdat", "updatedat",
+        "created_at", "updated_at", "isapproved",
+    }
 
     def _get_settlement_layers(self):
         return [
@@ -1396,6 +1431,185 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 return True
         return False
 
+    def _is_skipped_settlement_layer_field(self, field_name):
+        lower = field_name.lower()
+        if lower == self.SETTLEMENT_SYNC_FIELD.lower() or lower == "code":
+            return True
+        if lower in self.SETTLEMENT_SKIP_LAYER_FIELDS:
+            return True
+        return lower.startswith("shape_")
+
+    def _get_writable_settlement_api_fields(self, entity):
+        allowed = {"code", "geom", "isApproved"}
+        allowed.update(self.pcode_fields)
+        for attr in entity.get("attributes", []):
+            name = attr.get("name")
+            if not name:
+                continue
+            if attr.get("readOnly") or attr.get("readonly"):
+                continue
+            if name.lower() in self.SETTLEMENT_SKIP_API_FIELDS:
+                continue
+            allowed.add(name)
+        return allowed
+
+    def _entity_attr_lookup(self, entity):
+        return {
+            attr.get("name"): attr
+            for attr in entity.get("attributes", [])
+            if attr.get("name")
+        }
+
+    def _coerce_settlement_api_value(self, api_field, value, entity_attrs):
+        if not self._has_meaningful_value(value):
+            return None
+        value = self._convert_to_serializable(value)
+        if value is None:
+            return None
+        attr = entity_attrs.get(api_field) or {}
+        attr_type = str(attr.get("type") or "").lower()
+        if attr_type in ("boolean", "bool"):
+            if isinstance(value, str):
+                return value.strip().lower() in ("true", "1", "yes", "y")
+            return bool(value)
+        if attr_type in ("integer", "int", "number") and "float" not in attr_type:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+        if attr_type in ("float", "double", "decimal", "number"):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+        return value
+
+    @staticmethod
+    def _has_meaningful_value(value):
+        if value is None:
+            return False
+        if isinstance(value, str) and not value.strip():
+            return False
+        return True
+
+    def _build_settlement_geometry(self, geom):
+        if geom is None or geom.is_empty:
+            return None
+        geom = validate_and_repair_geometry(self.to_2d(geom))
+        if geom is None or geom.is_empty:
+            return None
+        return self._convert_to_serializable(geom.__geo_interface__)
+
+    def _fetch_kesmis_geo_gdf(self, model, url, headers):
+        for label, endpoint in (
+            ("geo/minimal", f"{url}/api/v1/data/geo/minimal"),
+            ("geo/full", f"{url}/api/v1/data/geo"),
+        ):
+            try:
+                response = requests.get(
+                    endpoint,
+                    headers=headers,
+                    params={"model": model},
+                    timeout=60,
+                )
+                response.raise_for_status()
+                gdf = self._build_gdf_from_geojson(response.json())
+                if not gdf.empty:
+                    self.log_message(f"Loaded {len(gdf)} KeSMIS {model} feature(s) from {label}.")
+                    return gdf
+            except Exception as e:
+                self.log_message(f"KeSMIS {model} fetch via {label} failed: {e}")
+        return None
+
+    def _lookup_ward_parent_ids(self, geom, wards_gdf):
+        """Return ward/subcounty/county IDs for a geometry using ward boundaries."""
+        if geom is None or wards_gdf is None or wards_gdf.empty:
+            return {}
+
+        if geom.geom_type in ("Polygon", "MultiPolygon"):
+            test_geom = geom.centroid
+        else:
+            test_geom = geom
+        if test_geom is None or test_geom.is_empty:
+            return {}
+
+        candidate_idx = list(wards_gdf.sindex.intersection(test_geom.bounds))
+        for cand in candidate_idx:
+            ward_geom = wards_gdf.geometry.iloc[cand]
+            try:
+                if not (ward_geom.contains(test_geom) or ward_geom.intersects(test_geom)):
+                    continue
+            except Exception:
+                continue
+            ward = wards_gdf.iloc[cand]
+            parent_ids = {}
+            if ward.get("id") is not None:
+                parent_ids["ward_id"] = int(ward["id"])
+            for key in ("subcounty_id", "county_id"):
+                if ward.get(key) is not None:
+                    try:
+                        parent_ids[key] = int(ward[key])
+                    except (TypeError, ValueError):
+                        pass
+            if parent_ids:
+                return parent_ids
+        return {}
+
+    def _get_settlement_entity(self):
+        for entity in self.api_entities:
+            if entity.get("model", "").lower() == "settlement":
+                return entity
+        return None
+
+    def _auto_match_fields(self, layer, entity, exclude_fields=None):
+        """Match layer fields to settlement API attributes (same logic as FieldMatchingWorker)."""
+        exclude_fields = exclude_fields or set()
+        exclude_fields.add(self.SETTLEMENT_SYNC_FIELD)
+        layer_fields = [
+            f.name() for f in layer.fields()
+            if f.name not in exclude_fields and not self._is_skipped_settlement_layer_field(f.name())
+        ]
+        writable_api_fields = sorted(
+            self._get_writable_settlement_api_fields(entity) - {"code", "geom", "isApproved"},
+            key=lambda x: x.lower(),
+        )
+        field_mapping = {}
+        scores = {}
+        table_data = []
+
+        for field in layer_fields:
+            candidates = process.extract(
+                field,
+                writable_api_fields,
+                scorer=fuzz.ratio,
+                score_cutoff=70,
+            )
+            if candidates:
+                best_field, best_score, _ = max(candidates, key=lambda x: x[1])
+                field_mapping[field] = best_field
+                scores[field] = best_score
+                table_data.append((field, best_field, str(int(best_score))))
+            else:
+                field_mapping[field] = None
+                table_data.append((field, "", "-"))
+
+        reverse_map = {}
+        for layer_field, api_field in field_mapping.items():
+            if api_field:
+                reverse_map.setdefault(api_field, []).append(layer_field)
+
+        for api_field, layer_list in reverse_map.items():
+            if len(layer_list) > 1:
+                sorted_layers = sorted(layer_list, key=lambda lf: scores.get(lf, 0), reverse=True)
+                for duplicate in sorted_layers[1:]:
+                    field_mapping[duplicate] = None
+                    for idx, row in enumerate(table_data):
+                        if row[0] == duplicate:
+                            table_data[idx] = (duplicate, "", "-")
+                            break
+
+        return field_mapping, table_data
+
     def _update_code_guidance(self):
         settlement_layers = self._get_settlement_layers()
         selected_settlement = self.settlement_layer_combo.currentData()
@@ -1406,22 +1620,20 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     _join_ui_text(
                         "Settlement layer '",
                         selected_settlement.name(),
-                        "' is already synced with KeSMIS (marked in the '",
+                        "' was previously synced with KeSMIS (marked in '",
                         self.SETTLEMENT_SYNC_FIELD,
-                        "' field). Codes were copied from the server. "
-                        "Syncing again is disabled to protect the official codes.",
+                        "'). You can run sync again to push field updates or create new settlements.",
                     )
                 )
-                self.sync_settlement_codes_button.setEnabled(False)
-                return
-            self.code_guidance_label.setText(
-                _join_ui_text(
-                    "Settlement layer selected: '",
-                    selected_settlement.name(),
-                    "'. Click Sync Settlement Codes from KeSMIS to match features by geometry, "
-                    "review the matches, then copy official codes from the server.",
+            else:
+                self.code_guidance_label.setText(
+                    _join_ui_text(
+                        "Settlement layer selected: '",
+                        selected_settlement.name(),
+                        "'. Click Sync Settlements with KeSMIS to match by geometry, map fields, "
+                        "and create or update records on the server.",
+                    )
                 )
-            )
             self.sync_settlement_codes_button.setEnabled(bool(self.token))
         elif settlement_layers:
             layer_names = ", ".join(layer.name() for layer in settlement_layers)
@@ -1430,7 +1642,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     "Settlement layer(s) detected: ",
                     layer_names,
                     ". Select a settlement layer from the dropdown above, then click "
-                    "Sync Settlement Codes from KeSMIS.",
+                    "Sync Settlements with KeSMIS.",
                 )
             )
             self.sync_settlement_codes_button.setEnabled(False)
@@ -1457,7 +1669,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 self,
                 "Settlement Layer",
                 f"'{layer.name()}' looks like a settlement layer.\n\n"
-                "Use Sync Settlement Codes from KeSMIS for settlement layers instead of "
+                "Use Sync Settlements with KeSMIS for settlement layers instead of "
                 "generating random codes here.",
             )
             self._clear_layer_selection()
@@ -1548,10 +1760,17 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             kesmis_code = self._row_code(row)
             if not kesmis_code:
                 continue
+            kesmis_row = {
+                k: self._convert_to_serializable(v)
+                for k, v in row.items()
+                if k != "geometry"
+            }
             results.append(
                 {
                     "kesmis_label": self._kesmis_label(row),
                     "kesmis_code": kesmis_code,
+                    "kesmis_id": row.get("id"),
+                    "kesmis_row": kesmis_row,
                     "overlap": overlap,
                 }
             )
@@ -1566,6 +1785,17 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 existing_codes.add(code)
                 return code
 
+    def _settlement_sync_status(self, current_code, kesmis_code, is_create=False):
+        if is_create:
+            return "Will create on KeSMIS"
+        if not kesmis_code:
+            return "No KeSMIS code available"
+        if not current_code:
+            return "Will update on KeSMIS"
+        if current_code == kesmis_code:
+            return "Will update on KeSMIS (code matches)"
+        return "Will update on KeSMIS (replace local code)"
+
     def _settlement_transfer_status(self, current_code, kesmis_code, is_generated=False):
         if is_generated:
             return "Will generate new code"
@@ -1577,10 +1807,11 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             return "Already matches"
         return "Will replace code"
 
-    def _compute_settlement_matches(self, layer, settlements_gdf):
-        layer_gdf = self._build_gdf_from_layer(layer, include_fid=True)
+    def _compute_settlement_matches(self, layer, settlements_gdf, layer_gdf=None):
+        if layer_gdf is None:
+            layer_gdf = self._build_gdf_from_layer(layer, include_fid=True)
         if layer_gdf.empty:
-            return []
+            return [], layer_gdf
 
         code_idx = None
         field_names = [f.name() for f in layer.fields()]
@@ -1613,32 +1844,46 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 }
             )
 
-        return matches
+        return matches, layer_gdf
 
-    def _resolve_settlement_matches(self, layer_name, matches):
-        """Let the user pick KeSMIS matches or confirm generated codes for non-intersections."""
+    def _resolve_settlement_matches(self, layer_name, matches, settlement_entity, field_mapping, mapping_table_data):
+        """Let the user review field mapping and geometry matches before syncing to KeSMIS."""
         if not matches:
-            return None
+            return None, field_mapping
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Review Settlement Matches")
-        dialog.setMinimumSize(820, 460)
+        dialog.setWindowTitle("Review Settlement Sync")
+        dialog.setMinimumSize(900, 560)
 
         layout = QVBoxLayout(dialog)
         multi_count = sum(1 for m in matches if len(m["candidates"]) > 1)
         no_match_count = sum(1 for m in matches if not m["candidates"])
+        update_count = len(matches) - no_match_count
         intro = QLabel(
-            f"Review matches for '{layer_name}'.\n"
-            f"Features with multiple KeSMIS intersections: {multi_count}\n"
-            f"Features with no intersection (will get a new short code): {no_match_count}\n"
-            "Choose the correct KeSMIS settlement where needed, then click Transfer Codes."
+            f"Review sync for '{layer_name}'.\n"
+            f"Matched to existing KeSMIS settlements (will update): {update_count}\n"
+            f"Multiple KeSMIS intersections (choose match): {multi_count}\n"
+            f"No intersection (will create new): {no_match_count}\n"
+            "Review code matching first, then adjust field mapping on the second tab."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        table = QTableWidget(len(matches), 5)
+        api_fields = sorted(
+            self._get_writable_settlement_api_fields(settlement_entity) - {"code", "geom", "isApproved"},
+            key=lambda x: x.lower(),
+        )
+
+        tabs = QTabWidget()
+
+        # Tab 1: code / geometry matching
+        matching_tab = QWidget()
+        matching_layout = QVBoxLayout(matching_tab)
+        matching_layout.setContentsMargins(8, 8, 8, 8)
+
+        table = QTableWidget(len(matches), 6)
         table.setHorizontalHeaderLabels(
-            ["Local Settlement", "Current Code", "KeSMIS Match", "Code To Apply", "Status"]
+            ["Local Settlement", "Current Code", "KeSMIS Match", "Code To Apply", "Action", "Status"]
         )
         table.horizontalHeader().setStretchLastSection(True)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -1649,6 +1894,14 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 existing_codes.add(match["current_code"])
             for candidate in match["candidates"]:
                 existing_codes.add(candidate["kesmis_code"])
+
+        def sync_status_for_selection(row_match, selected):
+            is_create = selected.get("generated", False)
+            return self._settlement_sync_status(
+                row_match["current_code"],
+                selected.get("kesmis_code"),
+                is_create=is_create,
+            )
 
         selectors = []
         for row, match in enumerate(matches):
@@ -1666,16 +1919,17 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
                 def update_combo_row(table_row, combo_box, row_match):
                     selected = combo_box.currentData()
+                    is_create = selected.get("generated", False)
                     table.setItem(table_row, 3, QTableWidgetItem(selected["kesmis_code"]))
                     table.setItem(
                         table_row,
                         4,
-                        QTableWidgetItem(
-                            self._settlement_transfer_status(
-                                row_match["current_code"],
-                                selected["kesmis_code"],
-                            )
-                        ),
+                        QTableWidgetItem("Create on KeSMIS" if is_create else "Update on KeSMIS"),
+                    )
+                    table.setItem(
+                        table_row,
+                        5,
+                        QTableWidgetItem(sync_status_for_selection(row_match, selected)),
                     )
 
                 combo.currentIndexChanged.connect(
@@ -1693,45 +1947,85 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             else:
                 generated = self._generate_settlement_short_code(existing_codes)
                 selected = {
-                    "kesmis_label": "No KeSMIS intersection — new code",
+                    "kesmis_label": "No KeSMIS intersection — new settlement",
                     "kesmis_code": generated,
                     "generated": True,
                 }
                 table.setItem(row, 2, QTableWidgetItem(selected["kesmis_label"]))
                 selectors.append(("generated", selected))
 
+            is_create = selected.get("generated", False)
             table.setItem(row, 3, QTableWidgetItem(selected["kesmis_code"]))
-            status = self._settlement_transfer_status(
-                match["current_code"],
-                selected["kesmis_code"],
-                is_generated=selected.get("generated", False),
+            table.setItem(
+                row,
+                4,
+                QTableWidgetItem("Create on KeSMIS" if is_create else "Update on KeSMIS"),
             )
-            table.setItem(row, 4, QTableWidgetItem(status))
+            table.setItem(
+                row,
+                5,
+                QTableWidgetItem(sync_status_for_selection(match, selected)),
+            )
 
         table.resizeColumnsToContents()
-        layout.addWidget(table)
+        matching_layout.addWidget(table)
 
         if no_match_count:
             note = QLabel(
                 f"{no_match_count} feature(s) did not intersect any KeSMIS settlement. "
-                "A new short code will be generated for each of those features."
+                "They will be created on the server with a new code."
             )
             note.setWordWrap(True)
             note.setStyleSheet("color: #8a4b00;")
-            layout.addWidget(note)
+            matching_layout.addWidget(note)
+
+        tabs.addTab(matching_tab, "Code Matching")
+
+        # Tab 2: field mapping
+        mapping_tab = QWidget()
+        mapping_layout = QVBoxLayout(mapping_tab)
+        mapping_layout.setContentsMargins(8, 8, 8, 8)
+        mapping_label = QLabel("Map local layer fields to KeSMIS settlement API attributes:")
+        mapping_label.setWordWrap(True)
+        mapping_layout.addWidget(mapping_label)
+
+        mapping_table = QTableWidget(len(mapping_table_data), 3)
+        mapping_table.setHorizontalHeaderLabels(["Layer Field", "API Field", "Match Score"])
+        mapping_table.horizontalHeader().setStretchLastSection(True)
+        mapping_combos = {}
+        for row, (layer_field, matched_api_field, score) in enumerate(mapping_table_data):
+            mapping_table.setItem(row, 0, QTableWidgetItem(layer_field))
+            combo = SearchableComboBox()
+            combo.addItems(api_fields)
+            combo.setCurrentText(matched_api_field if matched_api_field else "-")
+            mapping_table.setCellWidget(row, 1, combo)
+            mapping_table.setItem(row, 2, QTableWidgetItem(score))
+            mapping_combos[layer_field] = combo
+        mapping_table.resizeColumnsToContents()
+        mapping_layout.addWidget(mapping_table)
+
+        tabs.addTab(mapping_tab, "Field Mapping")
+        layout.addWidget(tabs, 1)
 
         buttons = QHBoxLayout()
-        transfer_button = QPushButton("Transfer Codes")
+        sync_button = QPushButton("Sync to KeSMIS")
         cancel_button = QPushButton("Cancel")
-        transfer_button.clicked.connect(dialog.accept)
+        sync_button.clicked.connect(dialog.accept)
         cancel_button.clicked.connect(dialog.reject)
         buttons.addStretch()
-        buttons.addWidget(transfer_button)
+        buttons.addWidget(sync_button)
         buttons.addWidget(cancel_button)
         layout.addLayout(buttons)
 
         if dialog.exec_() != QDialog.Accepted:
-            return None
+            return None, field_mapping
+
+        final_field_mapping = {}
+        for layer_field, combo in mapping_combos.items():
+            api_field = combo.currentText()
+            final_field_mapping[layer_field] = (
+                None if api_field == "-" or not api_field else api_field
+            )
 
         resolved = []
         for row, match in enumerate(matches):
@@ -1750,15 +2044,17 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     "current_code": match["current_code"],
                     "kesmis_label": selected["kesmis_label"],
                     "kesmis_code": kesmis_code,
+                    "kesmis_id": selected.get("kesmis_id"),
+                    "kesmis_row": selected.get("kesmis_row"),
                     "is_generated": is_generated,
-                    "status": self._settlement_transfer_status(
+                    "status": self._settlement_sync_status(
                         match["current_code"],
                         kesmis_code,
-                        is_generated=is_generated,
+                        is_create=is_generated,
                     ),
                 }
             )
-        return resolved
+        return resolved, final_field_mapping
 
     def _row_code(self, row):
         for key in ("code", "pcode", "settlement_code", "Code", "PCODE"):
@@ -1892,16 +2188,156 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             )
         raise ValueError(last_error or "Could not load settlement data from KeSMIS.")
 
+    def _build_settlement_upsert_features(self, layer_gdf, resolved, field_mapping, entity, wards_gdf=None):
+        """Build KeSMIS upsert payloads from resolved settlement matches and field mapping."""
+        allowed_fields = self._get_writable_settlement_api_fields(entity)
+        entity_attrs = self._entity_attr_lookup(entity)
+        features = []
+        for match in resolved:
+            if not match.get("kesmis_code"):
+                continue
+
+            feature_rows = layer_gdf[layer_gdf["_qgis_fid"] == match["feature_id"]]
+            if feature_rows.empty:
+                continue
+            row = feature_rows.iloc[0]
+            kesmis_row = match.get("kesmis_row") or {}
+
+            feature = {"code": str(match["kesmis_code"]).strip()}
+
+            for layer_field, api_field in field_mapping.items():
+                if not api_field or api_field not in allowed_fields:
+                    continue
+                if layer_field not in row.index:
+                    continue
+                value = self._coerce_settlement_api_value(
+                    api_field, row[layer_field], entity_attrs
+                )
+                if value is not None:
+                    feature[api_field] = value
+
+            for key in self.pcode_fields:
+                if key in feature:
+                    continue
+                if kesmis_row.get(key) is not None:
+                    try:
+                        feature[key] = int(kesmis_row[key])
+                    except (TypeError, ValueError):
+                        pass
+                elif key in row.index and self._has_meaningful_value(row[key]):
+                    try:
+                        feature[key] = int(row[key])
+                    except (TypeError, ValueError):
+                        pass
+
+            if match.get("is_generated") or "ward_id" not in feature:
+                if wards_gdf is not None:
+                    parent_ids = self._lookup_ward_parent_ids(row.geometry, wards_gdf)
+                    for key, value in parent_ids.items():
+                        if key not in feature:
+                            feature[key] = value
+
+            geom = self._build_settlement_geometry(row.geometry)
+            if geom is not None:
+                feature["geom"] = geom
+            feature["isApproved"] = True
+
+            filtered = {"code": feature["code"], "isApproved": True}
+            if feature.get("geom") is not None:
+                filtered["geom"] = feature["geom"]
+            for key, value in feature.items():
+                if key in ("code", "geom", "isApproved"):
+                    continue
+                if key in allowed_fields and self._has_meaningful_value(value):
+                    filtered[key] = self._convert_to_serializable(value)
+            features.append(filtered)
+        return features
+
+    def _submit_upsert_batches(self, model, features, dry_run=False, dry_run_limit=None):
+        """Submit features to KeSMIS import/upsert in batches."""
+        if not features:
+            return 0, 0, 0, []
+
+        if dry_run and dry_run_limit is not None:
+            features = features[:dry_run_limit]
+
+        url = self.server_url
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "x-access-token": self.token,
+        }
+        batch_size = 100
+        total = len(features)
+        all_inserted = all_updated = all_failed = 0
+        all_errors = []
+
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+
+        for start in range(0, total, batch_size):
+            batch = [
+                self._convert_to_serializable(feature)
+                for feature in features[start:start + batch_size]
+            ]
+            batch_num = start // batch_size + 1
+            action = "Validating batch" if dry_run else "Submitting batch"
+            self.log_message(
+                f"{action} {batch_num} ({start + 1}–{min(start + batch_size, total)} of {total})…"
+            )
+            try:
+                payload = {"model": model, "data": batch}
+                if dry_run:
+                    payload["dryRun"] = True
+                resp = requests.post(
+                    f"{url}/api/v1/data/import/upsert",
+                    json=payload,
+                    headers=headers,
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                all_inserted += data.get("insertedCount", 0)
+                all_updated += data.get("updatedCount", 0)
+                all_failed += data.get("failedCount", 0)
+                all_errors.extend(data.get("errors", []))
+            except requests.HTTPError as e:
+                detail = _format_import_http_error(
+                    e.response,
+                    str(e),
+                    format_error_lines=self._format_import_error_lines,
+                )
+                if batch:
+                    sample_keys = ", ".join(sorted(batch[0].keys()))
+                    self.log_message(f"Batch {batch_num} payload keys: {sample_keys}")
+                self.log_message(f"Batch {batch_num} failed entirely: {detail}")
+                all_failed += len(batch)
+            except Exception as e:
+                self.log_message(f"Batch {batch_num} failed entirely: {e}")
+                all_failed += len(batch)
+
+            percent = int((start + len(batch)) / total * 100)
+            self.progress_bar.setValue(percent)
+            QApplication.processEvents()
+
+        self.progress_bar.setValue(100)
+        self.progress_bar.setVisible(False)
+        return all_inserted, all_updated, all_failed, all_errors
+
     def _apply_settlement_code_matches(self, layer, matches):
         from qgis.core import edit
 
         transferable = [
             m for m in matches
-            if m["kesmis_code"] and m["status"] in (
-                "Will copy code",
-                "Will replace code",
-                "Already matches",
-                "Will generate new code",
+            if m["kesmis_code"] and (
+                m["status"].startswith("Will update on KeSMIS")
+                or m["status"] == "Will create on KeSMIS"
+                or m["status"] in (
+                    "Will copy code",
+                    "Will replace code",
+                    "Already matches",
+                    "Will generate new code",
+                )
             )
         ]
         if not transferable:
@@ -2032,25 +2468,24 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             QMessageBox.warning(
                 self,
                 "Login Required",
-                "Log in to KeSMIS before syncing settlement codes from the server.",
+                "Log in to KeSMIS before syncing settlements with the server.",
             )
-            return
-
-        if self._is_layer_kesmis_synced(layer):
-            QMessageBox.information(
-                self,
-                "Already Synced",
-                f"Layer '{layer.name()}' is already synced with KeSMIS.\n\n"
-                f"Features are marked in the '{self.SETTLEMENT_SYNC_FIELD}' field with the sync date. "
-                "To re-sync, remove that field from the layer first.",
-            )
-            self._update_code_guidance()
             return
 
         self._sync_settlement_codes_from_kesmis(layer)
 
     def _sync_settlement_codes_from_kesmis(self, layer):
         layer_name = layer.name()
+        settlement_entity = self._get_settlement_entity()
+        if not settlement_entity:
+            QMessageBox.warning(
+                self,
+                "Settlement Model Unavailable",
+                "Could not find the settlement entity on KeSMIS.\n\n"
+                "Wait for entities to load after login, then try again.",
+            )
+            return
+
         self.log_message(f"Fetching KeSMIS settlements and matching '{layer_name}'...")
         self.sync_settlement_codes_button.setEnabled(False)
         QApplication.processEvents()
@@ -2060,38 +2495,120 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         try:
             settlements_gdf = self._fetch_kesmis_settlements_gdf(url, headers)
 
-            matches = self._compute_settlement_matches(layer, settlements_gdf)
+            exclude_fields = {self.SETTLEMENT_SYNC_FIELD}
+            field_mapping, mapping_table_data = self._auto_match_fields(
+                layer, settlement_entity, exclude_fields
+            )
+            mapped_count = sum(1 for api_field in field_mapping.values() if api_field)
+            self.log_message(
+                f"Auto-mapped {mapped_count} layer field(s) to settlement API attributes."
+            )
+
+            matches, layer_gdf = self._compute_settlement_matches(layer, settlements_gdf)
             if not matches:
                 QMessageBox.warning(self, "No Features", f"Layer '{layer_name}' contains no features.")
                 return
 
-            resolved = self._resolve_settlement_matches(layer_name, matches)
+            resolved, field_mapping = self._resolve_settlement_matches(
+                layer_name,
+                matches,
+                settlement_entity,
+                field_mapping,
+                mapping_table_data,
+            )
             if not resolved:
-                self.log_message("Settlement code transfer cancelled.")
+                self.log_message("Settlement sync cancelled.")
                 return
 
-            filled, updated, unchanged, generated = self._apply_settlement_code_matches(layer, resolved)
+            wards_gdf = self._fetch_kesmis_geo_gdf("ward", url, headers)
+
+            features = self._build_settlement_upsert_features(
+                layer_gdf,
+                resolved,
+                field_mapping,
+                settlement_entity,
+                wards_gdf=wards_gdf,
+            )
+            if not features:
+                QMessageBox.warning(
+                    self,
+                    "Nothing To Sync",
+                    "No settlement features could be prepared for submission.",
+                )
+                return
+
+            is_dry_run = self.dry_run_checkbox.isChecked()
+            dry_run_limit = self.dry_run_spinbox.value() if is_dry_run else None
+            if is_dry_run:
+                self.log_message(
+                    f"DRY RUN: validating up to {dry_run_limit} settlement record(s) on KeSMIS."
+                )
+
+            inserted, updated, failed, errors = self._submit_upsert_batches(
+                settlement_entity["model"],
+                features,
+                dry_run=is_dry_run,
+                dry_run_limit=dry_run_limit,
+            )
+
+            if is_dry_run:
+                summary = (
+                    f"Settlement sync dry run for '{layer_name}'.\n\n"
+                    f"Would insert: {inserted}\n"
+                    f"Would update: {updated}\n"
+                    f"Failed validation: {failed}"
+                )
+                dialog_title = "Settlement Sync Dry Run"
+                if errors:
+                    summary += "\n\nErrors:\n" + "\n".join(self._format_import_error_lines(errors))
+                    QMessageBox.warning(self, dialog_title, summary)
+                else:
+                    QMessageBox.information(self, dialog_title, summary)
+                self.log_message(summary.replace("\n", " "))
+                return
+
+            if failed and not inserted and not updated:
+                summary = (
+                    f"Settlement sync failed for '{layer_name}'.\n\n"
+                    f"Failed: {failed}\n\n"
+                    "Check the log for the server error message and payload field list."
+                )
+                if errors:
+                    summary += "\n\nErrors:\n" + "\n".join(self._format_import_error_lines(errors))
+                self.log_message(summary.replace("\n", " "))
+                QMessageBox.critical(self, "Settlement Sync Failed", summary)
+                return
+
+            filled, local_updated, unchanged, generated = self._apply_settlement_code_matches(
+                layer, resolved
+            )
             summary = (
-                f"Settlement code transfer finished for '{layer_name}'.\n\n"
-                f"New codes copied: {filled}\n"
-                f"Existing codes replaced: {updated}\n"
-                f"Already matched: {unchanged}\n"
-                f"New short codes generated (no KeSMIS intersection): {generated}\n\n"
-                f"Synced features are marked in the '{self.SETTLEMENT_SYNC_FIELD}' field, "
-                "and syncing is now disabled for this layer."
+                f"Settlement sync finished for '{layer_name}'.\n\n"
+                f"KeSMIS inserted: {inserted}\n"
+                f"KeSMIS updated: {updated}\n"
+                f"KeSMIS failed: {failed}\n\n"
+                f"Local codes added: {filled}\n"
+                f"Local codes replaced: {local_updated}\n"
+                f"Local codes unchanged: {unchanged}\n"
+                f"New local codes (created): {generated}\n\n"
+                f"Synced features are marked in the '{self.SETTLEMENT_SYNC_FIELD}' field."
             )
             self.log_message(summary.replace("\n", " "))
-            QMessageBox.information(self, "Settlement Code Sync", summary)
+            if errors:
+                summary += "\n\nErrors:\n" + "\n".join(self._format_import_error_lines(errors))
+                QMessageBox.warning(self, "Settlement Sync Complete", summary)
+            else:
+                QMessageBox.information(self, "Settlement Sync Complete", summary)
 
             self.populate_layers()
             if self.layer_combo.currentData():
                 self.reset_data()
         except Exception as e:
-            self.log_message(f"Failed to sync settlement codes for '{layer_name}': {e}")
+            self.log_message(f"Failed to sync settlements for '{layer_name}': {e}")
             QMessageBox.critical(
                 self,
-                "Settlement Code Sync Failed",
-                f"Could not sync settlement codes for '{layer_name}':\n{e}",
+                "Settlement Sync Failed",
+                f"Could not sync settlements for '{layer_name}':\n{e}",
             )
         finally:
             self._update_code_guidance()
@@ -2117,19 +2634,47 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.log_textedit.clear()
 
     def _convert_to_serializable(self, value):
-        """Convert QVariant and other non-serializable types to JSON-serializable types."""
+        """Convert QVariant, numpy/pandas, and other types to JSON-serializable values."""
+        if value is None:
+            return None
         if isinstance(value, QVariant):
             if value.isNull():
                 return None
-            return value.toPyObject()
-        elif isinstance(value, (list, tuple)):
+            return self._convert_to_serializable(value.toPyObject())
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        try:
+            import numpy as np
+            if isinstance(value, np.integer):
+                return int(value)
+            if isinstance(value, np.floating):
+                number = float(value)
+                if number != number or number in (float("inf"), float("-inf")):
+                    return None
+                return number
+            if isinstance(value, np.bool_):
+                return bool(value)
+        except ImportError:
+            pass
+        if hasattr(value, "item") and not isinstance(value, (bytes, str)):
+            try:
+                return self._convert_to_serializable(value.item())
+            except (ValueError, AttributeError, TypeError):
+                pass
+        if isinstance(value, (list, tuple)):
             return [self._convert_to_serializable(item) for item in value]
-        elif isinstance(value, dict):
+        if isinstance(value, dict):
             return {k: self._convert_to_serializable(v) for k, v in value.items()}
-        elif isinstance(value, (int, float, str, bool)) or value is None:
+        if isinstance(value, (int, float, str, bool)):
+            if isinstance(value, float) and (
+                value != value or value in (float("inf"), float("-inf"))
+            ):
+                return None
             return value
-        else:
-            return str(value)
+        return str(value)
  
     def reset_data(self):
         """
@@ -2519,12 +3064,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         return shape(mapping(force_2d(geom)))
 
     def sanitize_json_value(self, value):
-        """Sanitize JSON values to handle NaN and infinity."""
-        if isinstance(value, float) and (value != value or value in [float("inf"), float("-inf")]):
-            return None
-        if value is None:
-            return None
-        return value
+        """Sanitize JSON values to handle NaN, infinity, and numpy/pandas scalars."""
+        return self._convert_to_serializable(value)
 
     def _format_import_error_lines(self, errors, limit=15):
         """Format API import errors for display in logs and message boxes."""
