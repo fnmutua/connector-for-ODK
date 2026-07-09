@@ -1,7 +1,7 @@
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
-from .connect_odk_dialog import ConnectODKDialog
+from .connect_odk_dialog import ConnectODKDialog, ODK_CONNECT_TIMEOUT, ODK_READ_TIMEOUT
 import requests
 import os
 from .split_layer_dialog import SplitLayerDialog  # Import the new SplitLayerDialog
@@ -212,7 +212,11 @@ class ConnectODK:
         """Fetch projects from ODK Central."""
         projects_api_url = f"{server_url}/v1/projects"
         try:
-            response = requests.get(projects_api_url, auth=(username, password), timeout=30)
+            response = requests.get(
+                projects_api_url,
+                auth=(username, password),
+                timeout=(ODK_CONNECT_TIMEOUT, ODK_READ_TIMEOUT),
+            )
             response.raise_for_status()
             projects = response.json()
 
@@ -224,7 +228,11 @@ class ConnectODK:
         """Fetch forms for the selected project."""
         forms_api_url = f"{server_url}/v1/projects/{project_id}/forms"
         try:
-            response = requests.get(forms_api_url, auth=(username, password), timeout=30)
+            response = requests.get(
+                forms_api_url,
+                auth=(username, password),
+                timeout=(ODK_CONNECT_TIMEOUT, ODK_READ_TIMEOUT),
+            )
             response.raise_for_status()
             forms = response.json()
             return forms
