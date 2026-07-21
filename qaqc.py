@@ -7,6 +7,13 @@ import geopandas as gpd
 import fiona
 from shapely.geometry import LineString, MultiLineString, Polygon, MultiPolygon
 from shapely.strtree import STRtree
+try:
+    from shapely.validation import explain_validity
+except ImportError:
+    def explain_validity(geom):
+        return "Invalid geometry"
+
+from .upload import validate_and_repair_geometry
 from fpdf import FPDF
 import pyproj
 from fuzzywuzzy import process
@@ -478,7 +485,80 @@ class ProcessGDBDialog(QDialog):
     def validate_geodataframe(self, gdf):
         if "geometry" in gdf.columns and gdf.geometry.name != "geometry":
             gdf = gdf.set_geometry("geometry", inplace=False)
+        gdf = gdf.copy()
+        repaired = []
+        self._geometry_repair_notes = {}
+        for idx, geom in gdf.geometry.items():
+            if geom is None or geom.is_empty:
+                self._geometry_repair_notes[idx] = "Geometry is null or empty"
+                repaired.append(geom)
+                continue
+            was_invalid = not geom.is_valid
+            try:
+                if was_invalid:
+                    fixed = validate_and_repair_geometry(geom)
+                    if fixed is None:
+                        self._geometry_repair_notes[idx] = (
+                            "Repair failed — geometry could not be fixed"
+                        )
+                        repaired.append(geom)
+                    elif not fixed.is_valid:
+                        self._geometry_repair_notes[idx] = explain_validity(fixed)
+                        repaired.append(fixed)
+                    else:
+                        repaired.append(fixed)
+                else:
+                    repaired.append(geom)
+            except Exception as exc:
+                fixed = validate_and_repair_geometry(geom)
+                if fixed is None or (fixed is not None and not fixed.is_valid):
+                    self._geometry_repair_notes[idx] = (
+                        f"Repair failed: {exc}"
+                    )
+                    repaired.append(fixed if fixed is not None else geom)
+                else:
+                    repaired.append(fixed)
+        gdf.geometry = repaired
         return gdf
+
+    @staticmethod
+    def _safe_intersects(geom1, geom2):
+        try:
+            return geom1.intersects(geom2)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _safe_intersection(geom1, geom2):
+        try:
+            return geom1.intersection(geom2)
+        except Exception:
+            return None
+
+    def check_invalid_geometries(self, gdf):
+        issue_indices = set()
+        issue_details = []
+        repair_notes = getattr(self, "_geometry_repair_notes", {})
+        for idx, geom in gdf.geometry.items():
+            if idx in repair_notes:
+                issue_indices.add(idx)
+                issue_details.append(
+                    (idx, "Repair Failed", repair_notes[idx], None, None)
+                )
+            elif geom is None or geom.is_empty:
+                issue_indices.add(idx)
+                issue_details.append(
+                    (idx, "Empty Geometry", "Geometry is null or empty", None, None)
+                )
+            elif not geom.is_valid:
+                issue_indices.add(idx)
+                reason = explain_validity(geom)
+                issue_details.append(
+                    (idx, "Invalid Geometry", reason, None, None)
+                )
+        if issue_indices:
+            return gdf.iloc[list(issue_indices)], issue_details
+        return None, None
 
     def make_timezone_naive(self, gdf):
         for col in gdf.columns:
@@ -520,11 +600,16 @@ class ProcessGDBDialog(QDialog):
                 possible_matches = [i for i in tree.query(geom) if i != idx]
                 for idx2 in possible_matches:
                     geom2 = gdf.geometry.iloc[idx2]
-                    if isinstance(geom2, (Polygon, MultiPolygon)) and geom.intersects(geom2):
-                        intersection = geom.intersection(geom2)
-                        if not intersection.is_empty and intersection.area > tolerance:
-                            overlap_area = intersection.area
-                            overlap_pairs.append((idx, idx2, overlap_area))
+                    if not isinstance(geom2, (Polygon, MultiPolygon)):
+                        continue
+                    if not self._safe_intersects(geom, geom2):
+                        continue
+                    intersection = self._safe_intersection(geom, geom2)
+                    if intersection is None or intersection.is_empty:
+                        continue
+                    if intersection.area > tolerance:
+                        overlap_area = intersection.area
+                        overlap_pairs.append((idx, idx2, overlap_area))
         if overlap_pairs:
             overlap_indices = set([idx for pair in overlap_pairs for idx in [pair[0], pair[1]]])
             return gdf.iloc[list(overlap_indices)], overlap_pairs
@@ -555,15 +640,26 @@ class ProcessGDBDialog(QDialog):
                     if lower_angle_threshold <= angle_degrees <= upper_angle_threshold:
                         issue_indices.add(idx)
                         issue_details.append((idx, "Sharp Turn", round(angle_degrees, 2), p2[0], p2[1]))
-                if not line.is_simple:
-                    intersections = line.intersection(line)
-                    if intersections.geom_type == "Point":
-                        issue_indices.add(idx)
-                        issue_details.append((idx, "Self-Intersection", None, intersections.x, intersections.y))
-                    elif intersections.geom_type == "MultiPoint":
-                        for pt in intersections.geoms:
+                try:
+                    if not line.is_simple:
+                        intersections = self._safe_intersection(line, line)
+                        if intersections is None:
                             issue_indices.add(idx)
-                            issue_details.append((idx, "Self-Intersection", None, pt.x, pt.y))
+                            issue_details.append(
+                                (idx, "Invalid Line", "Could not test self-intersection", None, None)
+                            )
+                        elif intersections.geom_type == "Point":
+                            issue_indices.add(idx)
+                            issue_details.append((idx, "Self-Intersection", None, intersections.x, intersections.y))
+                        elif intersections.geom_type == "MultiPoint":
+                            for pt in intersections.geoms:
+                                issue_indices.add(idx)
+                                issue_details.append((idx, "Self-Intersection", None, pt.x, pt.y))
+                except Exception as exc:
+                    issue_indices.add(idx)
+                    issue_details.append(
+                        (idx, "Invalid Line", str(exc), None, None)
+                    )
         if issue_indices:
             return gdf.iloc[list(issue_indices)], issue_details
         return None, None
@@ -714,25 +810,94 @@ class ProcessGDBDialog(QDialog):
         pdf.ln(5)
         
         # Table headers
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(60, 10, "Layer Name", border=1, align="C")
-        pdf.cell(40, 10, "Duplicates", border=1, align="C")
-        pdf.cell(40, 10, "Overlaps", border=1, align="C")
-        pdf.cell(40, 10, "Line Issues", border=1, align="C")
-        pdf.cell(40, 10, "Short Lines", border=1, align="C")
-        pdf.cell(40, 10, "Attribute Issues", border=1, align="C")
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(45, 10, "Layer Name", border=1, align="C")
+        pdf.cell(32, 10, "Invalid Geoms", border=1, align="C")
+        pdf.cell(32, 10, "Duplicates", border=1, align="C")
+        pdf.cell(32, 10, "Overlaps", border=1, align="C")
+        pdf.cell(32, 10, "Line Issues", border=1, align="C")
+        pdf.cell(32, 10, "Short Lines", border=1, align="C")
+        pdf.cell(32, 10, "Attr Issues", border=1, align="C")
         pdf.ln()
+
+        totals = {
+            "invalid_geometries": 0,
+            "duplicates": 0,
+            "overlaps": 0,
+            "line_issues": 0,
+            "short_lines": 0,
+            "attribute_issues": 0,
+        }
         
         # Table rows
-        pdf.set_font("Arial", size=12)
+        pdf.set_font("Arial", size=10)
         for layer, summary in layer_summary.items():
-            pdf.cell(60, 10, layer, border=1, align="C")
-            pdf.cell(40, 10, str(summary["duplicates"]), border=1, align="C")
-            pdf.cell(40, 10, str(summary["overlaps"]), border=1, align="C")
-            pdf.cell(40, 10, str(summary["line_issues"]), border=1, align="C")
-            pdf.cell(40, 10, str(summary["short_lines"]), border=1, align="C")
-            pdf.cell(40, 10, str(summary["attribute_issues"]), border=1, align="C")
+            pdf.cell(45, 10, layer[:28], border=1, align="C")
+            invalid_count = summary.get("invalid_geometries", 0)
+            pdf.cell(32, 10, str(invalid_count), border=1, align="C")
+            pdf.cell(32, 10, str(summary["duplicates"]), border=1, align="C")
+            pdf.cell(32, 10, str(summary["overlaps"]), border=1, align="C")
+            pdf.cell(32, 10, str(summary["line_issues"]), border=1, align="C")
+            pdf.cell(32, 10, str(summary["short_lines"]), border=1, align="C")
+            pdf.cell(32, 10, str(summary["attribute_issues"]), border=1, align="C")
             pdf.ln()
+            totals["invalid_geometries"] += invalid_count
+            totals["duplicates"] += summary["duplicates"]
+            totals["overlaps"] += summary["overlaps"]
+            totals["line_issues"] += summary["line_issues"]
+            totals["short_lines"] += summary["short_lines"]
+            totals["attribute_issues"] += summary["attribute_issues"]
+
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(45, 10, "TOTAL", border=1, align="C")
+        pdf.cell(32, 10, str(totals["invalid_geometries"]), border=1, align="C")
+        pdf.cell(32, 10, str(totals["duplicates"]), border=1, align="C")
+        pdf.cell(32, 10, str(totals["overlaps"]), border=1, align="C")
+        pdf.cell(32, 10, str(totals["line_issues"]), border=1, align="C")
+        pdf.cell(32, 10, str(totals["short_lines"]), border=1, align="C")
+        pdf.cell(32, 10, str(totals["attribute_issues"]), border=1, align="C")
+        pdf.ln()
+
+        pdf.ln(8)
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, txt="Column Definitions", ln=True)
+        pdf.ln(2)
+        column_definitions = [
+            (
+                "Invalid Geoms",
+                "Features with null, empty, or invalid geometry that could not be repaired automatically.",
+            ),
+            (
+                "Duplicates",
+                "Counts duplicate geometry pairs: two or more features whose shape is exactly the same "
+                "(compared using geometry WKT), even if their attribute values differ. Each matching pair "
+                "is counted once. Flagged features are exported to *_duplicate_geometries.gpkg, with "
+                "pair details in *_duplicates.xlsx. Duplicate attribute rows (identical non-geometry "
+                "fields) are checked separately and saved to *_duplicate_attributes.gpkg when found.",
+            ),
+            (
+                "Overlaps",
+                "Polygon pairs that share an area greater than 0.01 m2 (calculated in EPSG:21037).",
+            ),
+            (
+                "Line Issues",
+                "Line features with sharp turns within the configured min/max angle range, or self-intersections.",
+            ),
+            (
+                "Short Lines",
+                "Line features shorter than the minimum length threshold (measured in EPSG:21037).",
+            ),
+            (
+                "Attr Issues",
+                "Features with attribute values that do not match the expected dictionary specification.",
+            ),
+        ]
+        for title, explanation in column_definitions:
+            pdf.set_font("Arial", "B", 10)
+            pdf.cell(0, 6, txt=f"{title}:", ln=True)
+            pdf.set_font("Arial", size=10)
+            pdf.multi_cell(0, 5, explanation)
+            pdf.ln(1)
         
         # Add section for missing or unmatched layers
         pdf.ln(10)
@@ -787,21 +952,89 @@ class ProcessGDBDialog(QDialog):
                     total_features += len(gdf)
                     gdf["feature_id"] = range(1, len(gdf) + 1)
                     gdf = self.make_timezone_naive(gdf)
-                    duplicate_geoms, duplicate_pairs = self.check_duplicate_geometries(gdf)
-                    duplicate_attrs = self.check_duplicate_attributes(gdf)
-                    overlapping_polys, overlap_pairs = self.check_overlapping_polygons(gdf)
-                    line_issues, line_issue_details = self.check_sharp_turns_self_intersections(gdf)
-                    short_lines, short_line_details = self.check_short_linear_features(gdf)
-                    attribute_issues, attribute_issue_details = self.check_attributes(gdf, layer, unmatched_layers)
+
+                    invalid_geoms, invalid_geom_details = None, None
+                    duplicate_geoms, duplicate_pairs = None, None
+                    duplicate_attrs = None
+                    overlapping_polys, overlap_pairs = None, None
+                    line_issues, line_issue_details = None, None
+                    short_lines, short_line_details = None, None
+                    attribute_issues, attribute_issue_details = None, None
+
+                    checks = [
+                        ("invalid geometries", lambda: self.check_invalid_geometries(gdf)),
+                        ("duplicate geometries", lambda: self.check_duplicate_geometries(gdf)),
+                        ("duplicate attributes", lambda: self.check_duplicate_attributes(gdf)),
+                        ("overlapping polygons", lambda: self.check_overlapping_polygons(gdf)),
+                        ("line issues", lambda: self.check_sharp_turns_self_intersections(gdf)),
+                        ("short lines", lambda: self.check_short_linear_features(gdf)),
+                        ("attributes", lambda: self.check_attributes(gdf, layer, unmatched_layers)),
+                    ]
+                    results = {}
+                    for check_name, check_func in checks:
+                        try:
+                            result = check_func()
+                            results[check_name] = result
+                        except Exception as exc:
+                            self.log_message(
+                                f"Layer {layer}: {check_name} check skipped due to error: {exc}"
+                            )
+                            if check_name == "duplicate attributes":
+                                results[check_name] = None
+                            else:
+                                results[check_name] = (None, None)
+
+                    invalid_geoms, invalid_geom_details = results["invalid geometries"]
+                    duplicate_geoms, duplicate_pairs = results["duplicate geometries"]
+                    duplicate_attrs = results["duplicate attributes"]
+                    overlapping_polys, overlap_pairs = results["overlapping polygons"]
+                    line_issues, line_issue_details = results["line issues"]
+                    short_lines, short_line_details = results["short lines"]
+                    attribute_issues, attribute_issue_details = results["attributes"]
                     print('attribute_issues',attribute_issues)
                     print('attribute_issue_details',attribute_issue_details)
                     layer_summary[layer] = {
+                        "invalid_geometries": len(invalid_geom_details) if invalid_geom_details else 0,
                         "duplicates": len(duplicate_pairs) if duplicate_pairs else 0,
                         "overlaps": len(overlap_pairs) if overlap_pairs else 0,
                         "line_issues": len(line_issue_details) if line_issue_details else 0,
                         "short_lines": len(short_line_details) if short_line_details else 0,
                         "attribute_issues": len(attribute_issue_details) if attribute_issue_details else 0
                     }
+                    if invalid_geoms is not None:
+                        count = len(invalid_geom_details) if invalid_geom_details else 0
+                        self.log_message(
+                            f"Layer {layer}: {count} feature(s) with bad geometry "
+                            f"(repair failed or still invalid after repair)."
+                        )
+                        if invalid_geom_details:
+                            for detail in invalid_geom_details:
+                                feat_idx, issue_type, description, _, _ = detail
+                                feature_id = gdf.iloc[feat_idx]["feature_id"]
+                                self.log_message(
+                                    f"  feature_id {feature_id}: {issue_type} — {description}"
+                                )
+                        issue_file = os.path.join(self.output_folder, f"{layer}_invalid_geometries.gpkg")
+                        self._write_gpkg(invalid_geoms, issue_file)
+                        print(f"  - Invalid geometries saved to {issue_file}")
+                        if invalid_geom_details:
+                            invalid_geom_details_df = pd.DataFrame(
+                                invalid_geom_details,
+                                columns=["FeatureIndex", "IssueType", "Description", "x", "y"]
+                            )
+                            invalid_geom_details_df["feature_id"] = gdf.iloc[
+                                invalid_geom_details_df["FeatureIndex"]
+                            ]["feature_id"].values
+                            invalid_geom_details_df = invalid_geom_details_df[
+                                ["feature_id", "FeatureIndex", "IssueType", "Description", "x", "y"]
+                            ]
+                            all_features_df = gdf[["feature_id"] + [col for col in gdf.columns if col != "geometry"]]
+                            excel_file = os.path.join(self.output_folder, f"{layer}_invalid_geometries.xlsx")
+                            self._write_excel(excel_file, {
+                                "Invalid Geometries": invalid_geom_details_df,
+                                "All Features": all_features_df,
+                            })
+                            print(f"  - Invalid geometry details saved to {excel_file}")
                     if duplicate_geoms is not None:
                         issue_file = os.path.join(self.output_folder, f"{layer}_duplicate_geometries.gpkg")
                         self._write_gpkg(duplicate_geoms, issue_file)
