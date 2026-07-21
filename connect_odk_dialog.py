@@ -920,7 +920,7 @@ class ConnectODKDialog(QDialog, CollapsibleHelpMixin):
  
     """Dialog to get user input for ODK Central credentials and form selection."""
 
-    def __init__(self, parent=None, default_url="", default_username="", default_password=""):
+    def __init__(self, parent=None, default_url="", default_username="", saved_password=None):
         """Constructor."""
         super().__init__(parent)
         configure_qgis_dialog(self, parent)
@@ -954,7 +954,7 @@ class ConnectODKDialog(QDialog, CollapsibleHelpMixin):
         self.password_edit = QLineEdit()
         self.password_edit.setPlaceholderText("Password")
         self.password_edit.setEchoMode(QLineEdit.Password)
-        self.password_edit.setText(self.settings.value("password", default_password))
+        self.password_edit.setText(self.settings.value("password", saved_password or ""))
 
         self.save_button = QPushButton("Save Credentials")
         self.save_button.clicked.connect(self.save_credentials)
@@ -1135,7 +1135,7 @@ class ConnectODKDialog(QDialog, CollapsibleHelpMixin):
             if home:
                 return Path(home) / ".connect_odk_checkpoints"
         except Exception:
-            pass
+            return Path(os.getcwd()) / ".connect_odk_checkpoints"
         return Path(os.getcwd()) / ".connect_odk_checkpoints"
 
     def log_message(self, message):

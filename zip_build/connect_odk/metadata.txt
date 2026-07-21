@@ -6,7 +6,7 @@
 name=Connector for ODK
 qgisMinimumVersion=3.0
 description=Connect to ODK Central, split layers, run QA/QC on File Geodatabases, and upload vector data to KeSMIS — with in-app help on every tool.
-version=2.2.1
+version=2.3.2
 author=Felix Mutua
 email=mutua@ags.co.ke
 
@@ -19,7 +19,7 @@ repository=https://github.com/fnmutua/connector-for-ODK
 # Recommended items:
 
 hasProcessingProvider=no
-changelog=Version 2.2.1: Settlement sync upsert fixes (JSON types, ward lookup, payload validation, clearer API errors). Version 2.2.0: Full KeSMIS settlement sync with field mapping, create/update upsert, and tabbed review dialog. Version 2.1.3: Clear KeSMIS session-limit message on login (DEVICE_LIMIT_REACHED).
+changelog=Version 2.3.2: Security fixes for QGIS plugin repository Bandit scan — remove subprocess pip install, replace bare except/pass patterns, rename password defaults. Version 2.3.1: QA/QC geometry resilience — auto-repair invalid geometries, flag unrepaired features, invalid geoms column in PDF with column definitions, no invalid-geometry popup. Version 2.3.0: ODK download resilience — download all at once option, configurable read timeout, checkpoint/resume, retry and adaptive chunking for 504/500 errors, small-batch fallback at high offsets. Version 2.2.1: Settlement sync upsert fixes (JSON types, ward lookup, payload validation, clearer API errors).
 
 # Tags are comma separated with spaces allowed
 tags=python, odk, odk central, kesmis, qa, qc, geodatabase, import, export

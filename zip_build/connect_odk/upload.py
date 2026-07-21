@@ -1,5 +1,3 @@
-import subprocess
-import sys
 import requests
 import os
 from datetime import datetime
@@ -67,8 +65,29 @@ def validate_and_repair_geometry(geom, tolerance=1e-8):
             if hasattr(geom, 'bounds'):
                 minx, miny, maxx, maxy = geom.bounds
                 return box(minx, miny, maxx, maxy)
-        except:
-            pass
+        except Exception:
+            return None
+        return None
+
+
+def _geometries_overlap(geom_a, geom_b):
+    try:
+        return geom_a.contains(geom_b) or geom_a.intersects(geom_b)
+    except Exception:
+        return False
+
+
+def _intersection_area(geom_a, geom_b):
+    try:
+        return geom_a.intersection(geom_b).area
+    except Exception:
+        return None
+
+
+def _shape_from_geojson(geom_dict):
+    try:
+        return validate_and_repair_geometry(shape(geom_dict))
+    except Exception:
         return None
 
 def add_geojson_to_map(filepath, layer_name):
@@ -129,7 +148,7 @@ except ImportError:
             if hasattr(geom, 'buffer'):
                 return geom.buffer(0)
             return geom
-        except:
+        except Exception:
             return None
 
 
@@ -1028,7 +1047,6 @@ class KesMISLoginDialog(QDialog):
         self.settings = QSettings("YourOrganization", "KesMIS")
         self.url = ""
         self.username = ""
-        self.password = ""
         self.token = None
         self._login_in_progress = False
 
@@ -1119,7 +1137,6 @@ class KesMISLoginDialog(QDialog):
         if kesmis_validate_token(url, saved_token):
             self.url = url.rstrip("/")
             self.username = self.username_input.text()
-            self.password = self.password_input.text()
             self.token = saved_token
             self.accept()
             return
@@ -1154,7 +1171,6 @@ class KesMISLoginDialog(QDialog):
 
             self.url = url.rstrip("/")
             self.username = username
-            self.password = password
             self.token = token
 
             if self.save_credentials.isChecked():
@@ -1229,6 +1245,20 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.code_guidance_label.setWordWrap(True)
         self.code_guidance_label.setStyleSheet("color: #8a4b00;")
 
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(True)
+        self._progress_anim_timer = QTimer(self)
+        self._progress_anim_timer.setInterval(75)
+        self._progress_anim_timer.timeout.connect(self._tick_progress_animation)
+        self._progress_anim_mode = None
+        self._progress_anim_message = ""
+        self._progress_anim_step = 0
+        self._progress_anim_value = 0
+        self._progress_anim_direction = 1
+
         layer_selection_layout = QHBoxLayout()
         self.layer_combo = QComboBox()
         self.layer_combo.setEnabled(False)
@@ -1252,6 +1282,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         entity_selection_layout.addWidget(self.entity_combo)
         layer_layout.addLayout(settlement_layout)
         layer_layout.addWidget(self.code_guidance_label)
+        layer_layout.addWidget(self.progress_bar)
         layer_layout.addLayout(layer_selection_layout)
         layer_layout.addLayout(parent_selection_layout)
         layer_layout.addLayout(entity_selection_layout)
@@ -1305,12 +1336,6 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         mapping_layout.addWidget(self.submit_button)
         mapping_box.setLayout(mapping_layout)
 
-        # Progress Bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
-        self.progress_bar.setVisible(False)
-
         # Log Display
         log_box = QGroupBox("Log")
         log_layout = QVBoxLayout()
@@ -1328,7 +1353,6 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         log_box.setLayout(log_layout)
 
         main_layout.addWidget(mapping_box)
-        main_layout.addWidget(self.progress_bar)
         main_layout.addWidget(log_box)
 
         # Create scroll area
@@ -1406,6 +1430,72 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         "id", "geom", "geojson", "geometry", "createdat", "updatedat",
         "created_at", "updated_at", "isapproved",
     }
+
+    def _start_progress_animation(self, message="", mode="marquee"):
+        self._progress_anim_mode = mode
+        self._progress_anim_message = message
+        self._progress_anim_step = 0
+        self._progress_anim_value = 5
+        self._progress_anim_direction = 1
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setRange(0, 100)
+        if mode == "marquee":
+            self.progress_bar.setValue(5)
+        if not self._progress_anim_timer.isActive():
+            self._progress_anim_timer.start()
+
+    def _stop_progress_animation(self):
+        if self._progress_anim_timer.isActive():
+            self._progress_anim_timer.stop()
+        self._progress_anim_mode = None
+
+    def _tick_progress_animation(self):
+        self._progress_anim_step += 1
+        dots = "." * ((self._progress_anim_step % 3) + 1)
+        message = self._progress_anim_message or "Working"
+        if self._progress_anim_mode == "marquee":
+            self._progress_anim_value += 5 * self._progress_anim_direction
+            if self._progress_anim_value >= 90:
+                self._progress_anim_value = 90
+                self._progress_anim_direction = -1
+            elif self._progress_anim_value <= 5:
+                self._progress_anim_value = 5
+                self._progress_anim_direction = 1
+            self.progress_bar.setValue(self._progress_anim_value)
+            self.progress_bar.setFormat(f"{message}{dots}")
+        elif self._progress_anim_mode == "determinate":
+            self.progress_bar.setFormat(f"{message}{dots}  %p%")
+
+    def _start_settlement_sync_progress(self, message="Starting settlement sync..."):
+        self.progress_bar.setVisible(True)
+        self._start_progress_animation(message, mode="marquee")
+
+    def _update_settlement_sync_progress(self, value=None, message=None, indeterminate=False):
+        if message:
+            self._progress_anim_message = message
+        if indeterminate:
+            self._start_progress_animation(
+                message or self._progress_anim_message,
+                mode="marquee",
+            )
+            return
+
+        self._progress_anim_mode = "determinate"
+        self.progress_bar.setRange(0, 100)
+        if value is not None:
+            self.progress_bar.setValue(min(max(int(value), 0), 100))
+        if not self._progress_anim_timer.isActive():
+            self._progress_anim_timer.start()
+        self._tick_progress_animation()
+        QApplication.processEvents()
+
+    def _finish_settlement_sync_progress(self):
+        self._stop_progress_animation()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("")
+        self.progress_bar.setVisible(False)
+        QApplication.processEvents()
 
     def _get_settlement_layers(self):
         return [
@@ -1536,10 +1626,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         candidate_idx = list(wards_gdf.sindex.intersection(test_geom.bounds))
         for cand in candidate_idx:
             ward_geom = wards_gdf.geometry.iloc[cand]
-            try:
-                if not (ward_geom.contains(test_geom) or ward_geom.intersects(test_geom)):
-                    continue
-            except Exception:
+            if not _geometries_overlap(ward_geom, test_geom):
                 continue
             ward = wards_gdf.iloc[cand]
             parent_ids = {}
@@ -1749,11 +1836,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             else:
                 if not settlement_geom.intersects(feature_geom):
                     continue
-                try:
-                    overlap = settlement_geom.intersection(feature_geom).area
-                except Exception:
-                    continue
-                if overlap <= 0:
+                overlap = _intersection_area(settlement_geom, feature_geom)
+                if overlap is None or overlap <= 0:
                     continue
 
             row = settlements_gdf.iloc[cand]
@@ -1807,8 +1891,10 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             return "Already matches"
         return "Will replace code"
 
-    def _compute_settlement_matches(self, layer, settlements_gdf, layer_gdf=None):
+    def _compute_settlement_matches(self, layer, settlements_gdf, layer_gdf=None, progress_callback=None):
         if layer_gdf is None:
+            if progress_callback:
+                progress_callback(28, "Loading layer features...", indeterminate=True)
             layer_gdf = self._build_gdf_from_layer(layer, include_fid=True)
         if layer_gdf.empty:
             return [], layer_gdf
@@ -1821,7 +1907,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             code_idx = {name.lower(): idx for idx, name in enumerate(field_names)}["code"]
 
         matches = []
-        for _, row in layer_gdf.iterrows():
+        total = len(layer_gdf)
+        for idx, (_, row) in enumerate(layer_gdf.iterrows()):
             feature_id = row.get("_qgis_fid")
             if feature_id is None:
                 continue
@@ -1843,6 +1930,12 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     "candidates": candidates,
                 }
             )
+            if progress_callback and total:
+                pct = 30 + int((idx + 1) / total * 35)
+                progress_callback(
+                    pct,
+                    f"Matching settlements ({idx + 1}/{total})...",
+                )
 
         return matches, layer_gdf
 
@@ -2253,7 +2346,16 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             features.append(filtered)
         return features
 
-    def _submit_upsert_batches(self, model, features, dry_run=False, dry_run_limit=None):
+    def _submit_upsert_batches(
+        self,
+        model,
+        features,
+        dry_run=False,
+        dry_run_limit=None,
+        progress_start=0,
+        progress_end=100,
+        manage_visibility=True,
+    ):
         """Submit features to KeSMIS import/upsert in batches."""
         if not features:
             return 0, 0, 0, []
@@ -2270,10 +2372,14 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         total = len(features)
         all_inserted = all_updated = all_failed = 0
         all_errors = []
+        progress_span = max(progress_end - progress_start, 1)
 
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(True)
+        if manage_visibility:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(progress_start)
+            self.progress_bar.setVisible(True)
+        elif progress_start == 0:
+            self.progress_bar.setValue(0)
 
         for start in range(0, total, batch_size):
             batch = [
@@ -2285,6 +2391,10 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             self.log_message(
                 f"{action} {batch_num} ({start + 1}–{min(start + batch_size, total)} of {total})…"
             )
+            if not manage_visibility:
+                self._update_settlement_sync_progress(
+                    message=f"{action} {batch_num} ({start + 1}–{min(start + batch_size, total)} of {total})...",
+                )
             try:
                 payload = {"model": model, "data": batch}
                 if dry_run:
@@ -2316,12 +2426,16 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 self.log_message(f"Batch {batch_num} failed entirely: {e}")
                 all_failed += len(batch)
 
-            percent = int((start + len(batch)) / total * 100)
-            self.progress_bar.setValue(percent)
+            percent = progress_start + int((start + len(batch)) / total * progress_span)
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(min(percent, progress_end))
             QApplication.processEvents()
 
-        self.progress_bar.setValue(100)
-        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(progress_end)
+        QApplication.processEvents()
+        if manage_visibility:
+            self.progress_bar.setVisible(False)
         return all_inserted, all_updated, all_failed, all_errors
 
     def _apply_settlement_code_matches(self, layer, matches):
@@ -2426,10 +2540,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             geom_dict = feat.get("geometry")
             if not geom_dict:
                 continue
-            try:
-                geom = validate_and_repair_geometry(shape(geom_dict))
-            except Exception:
-                continue
+            geom = _shape_from_geojson(geom_dict)
             if geom is None or geom.is_empty:
                 continue
             props = feat.get("properties")
@@ -2488,12 +2599,13 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         self.log_message(f"Fetching KeSMIS settlements and matching '{layer_name}'...")
         self.sync_settlement_codes_button.setEnabled(False)
-        QApplication.processEvents()
+        self._start_settlement_sync_progress("Fetching KeSMIS settlements...")
 
         url = self.server_url
         headers = {"Authorization": f"Bearer {self.token}", "x-access-token": self.token}
         try:
             settlements_gdf = self._fetch_kesmis_settlements_gdf(url, headers)
+            self._update_settlement_sync_progress(20, "Mapping layer fields...")
 
             exclude_fields = {self.SETTLEMENT_SYNC_FIELD}
             field_mapping, mapping_table_data = self._auto_match_fields(
@@ -2503,12 +2615,18 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             self.log_message(
                 f"Auto-mapped {mapped_count} layer field(s) to settlement API attributes."
             )
+            self._update_settlement_sync_progress(25, "Matching local settlements to KeSMIS...")
 
-            matches, layer_gdf = self._compute_settlement_matches(layer, settlements_gdf)
+            matches, layer_gdf = self._compute_settlement_matches(
+                layer,
+                settlements_gdf,
+                progress_callback=self._update_settlement_sync_progress,
+            )
             if not matches:
                 QMessageBox.warning(self, "No Features", f"Layer '{layer_name}' contains no features.")
                 return
 
+            self._update_settlement_sync_progress(65, "Review matches...")
             resolved, field_mapping = self._resolve_settlement_matches(
                 layer_name,
                 matches,
@@ -2520,7 +2638,9 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 self.log_message("Settlement sync cancelled.")
                 return
 
+            self._update_settlement_sync_progress(70, "Loading ward boundaries...", indeterminate=True)
             wards_gdf = self._fetch_kesmis_geo_gdf("ward", url, headers)
+            self._update_settlement_sync_progress(80, "Preparing records for upload...")
 
             features = self._build_settlement_upsert_features(
                 layer_gdf,
@@ -2549,6 +2669,9 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 features,
                 dry_run=is_dry_run,
                 dry_run_limit=dry_run_limit,
+                progress_start=85,
+                progress_end=98,
+                manage_visibility=False,
             )
 
             if is_dry_run:
@@ -2582,6 +2705,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             filled, local_updated, unchanged, generated = self._apply_settlement_code_matches(
                 layer, resolved
             )
+            self._update_settlement_sync_progress(100, "Settlement sync complete.")
             summary = (
                 f"Settlement sync finished for '{layer_name}'.\n\n"
                 f"KeSMIS inserted: {inserted}\n"
@@ -2611,6 +2735,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 f"Could not sync settlements for '{layer_name}':\n{e}",
             )
         finally:
+            self._finish_settlement_sync_progress()
             self._update_code_guidance()
 
     def clear_search(self):

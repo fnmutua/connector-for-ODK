@@ -13,7 +13,7 @@ def plugin_dialog_parent():
         if iface is not None:
             return iface.mainWindow()
     except Exception:
-        pass
+        return None
     return None
 
 

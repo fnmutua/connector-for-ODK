@@ -7,9 +7,6 @@ import os
 from .split_layer_dialog import SplitLayerDialog  # Import the new SplitLayerDialog
 from .resources import *
 from qgis.PyQt.QtWidgets import QMessageBox, QDialog
-import os
-import sys
-import subprocess
 
 from .qaqc import ProcessGDBDialog  # Import the new SplitLayerDialog
 from .upload import KesMISDialog, KesMISLoginDialog  # Import the new SplitLayerDialog
@@ -81,28 +78,25 @@ class ConnectODK:
 
 
     def ensure_packages_installed(self, packages):
-        """
-        Checks and installs a list of packages if missing.
-
-        Args:
-            packages (list): A list of package names to check and install.
-        """
+        """Warn when required Python packages are missing from the QGIS environment."""
+        missing = []
         for package in packages:
             import_name, install_name = package if isinstance(package, tuple) else (package, package)
             try:
-                __import__(import_name)  # Try importing the package
-                #self.log_message(f"{package} is already installed.")
+                __import__(import_name)
             except ImportError:
-                QMessageBox.information(self.iface.mainWindow(), "Installing Dependencies", f"Installing {install_name}, please wait...")
-                self.log_message(f"{import_name} not found. Installing {install_name}...")
+                missing.append(install_name)
 
-                try:
-                    # Install the package using pip
-                    subprocess.run([sys.executable, "-m", "pip", "install", install_name], check=True)
-                    self.log_message(f"{import_name} is now installed.")
-                except Exception as e:
-                    QMessageBox.critical(self.iface.mainWindow(), "Installation Failed", f"Error installing {install_name}: {e}")
-                    self.log_message(f"Failed to install {install_name}: {e}")
+        if missing:
+            pip_cmd = "pip install " + " ".join(missing)
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Missing Dependencies",
+                "Please install the following Python packages in your QGIS environment:\n\n"
+                f"{pip_cmd}\n\n"
+                "Restart QGIS after installing.",
+            )
+            self.log_message(f"Missing packages: {', '.join(missing)}")
 
     def log_message(self, message):
         """Logs messages to the QGIS Python console."""

@@ -1,5 +1,3 @@
-import subprocess
-import sys
 import requests
 import os
 from datetime import datetime
@@ -67,8 +65,29 @@ def validate_and_repair_geometry(geom, tolerance=1e-8):
             if hasattr(geom, 'bounds'):
                 minx, miny, maxx, maxy = geom.bounds
                 return box(minx, miny, maxx, maxy)
-        except:
-            pass
+        except Exception:
+            return None
+        return None
+
+
+def _geometries_overlap(geom_a, geom_b):
+    try:
+        return geom_a.contains(geom_b) or geom_a.intersects(geom_b)
+    except Exception:
+        return False
+
+
+def _intersection_area(geom_a, geom_b):
+    try:
+        return geom_a.intersection(geom_b).area
+    except Exception:
+        return None
+
+
+def _shape_from_geojson(geom_dict):
+    try:
+        return validate_and_repair_geometry(shape(geom_dict))
+    except Exception:
         return None
 
 def add_geojson_to_map(filepath, layer_name):
@@ -129,7 +148,7 @@ except ImportError:
             if hasattr(geom, 'buffer'):
                 return geom.buffer(0)
             return geom
-        except:
+        except Exception:
             return None
 
 
@@ -1028,7 +1047,6 @@ class KesMISLoginDialog(QDialog):
         self.settings = QSettings("YourOrganization", "KesMIS")
         self.url = ""
         self.username = ""
-        self.password = ""
         self.token = None
         self._login_in_progress = False
 
@@ -1119,7 +1137,6 @@ class KesMISLoginDialog(QDialog):
         if kesmis_validate_token(url, saved_token):
             self.url = url.rstrip("/")
             self.username = self.username_input.text()
-            self.password = self.password_input.text()
             self.token = saved_token
             self.accept()
             return
@@ -1154,7 +1171,6 @@ class KesMISLoginDialog(QDialog):
 
             self.url = url.rstrip("/")
             self.username = username
-            self.password = password
             self.token = token
 
             if self.save_credentials.isChecked():
@@ -1610,10 +1626,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         candidate_idx = list(wards_gdf.sindex.intersection(test_geom.bounds))
         for cand in candidate_idx:
             ward_geom = wards_gdf.geometry.iloc[cand]
-            try:
-                if not (ward_geom.contains(test_geom) or ward_geom.intersects(test_geom)):
-                    continue
-            except Exception:
+            if not _geometries_overlap(ward_geom, test_geom):
                 continue
             ward = wards_gdf.iloc[cand]
             parent_ids = {}
@@ -1823,11 +1836,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             else:
                 if not settlement_geom.intersects(feature_geom):
                     continue
-                try:
-                    overlap = settlement_geom.intersection(feature_geom).area
-                except Exception:
-                    continue
-                if overlap <= 0:
+                overlap = _intersection_area(settlement_geom, feature_geom)
+                if overlap is None or overlap <= 0:
                     continue
 
             row = settlements_gdf.iloc[cand]
@@ -2530,10 +2540,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             geom_dict = feat.get("geometry")
             if not geom_dict:
                 continue
-            try:
-                geom = validate_and_repair_geometry(shape(geom_dict))
-            except Exception:
-                continue
+            geom = _shape_from_geojson(geom_dict)
             if geom is None or geom.is_empty:
                 continue
             props = feat.get("properties")
