@@ -6,8 +6,5 @@ shapely
 pyproj
 fpdf2
 requests
-fuzzywuzzy
-rapidfuzz
-shortuuid
 openpyxl
 xlsxwriter

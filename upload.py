@@ -10,18 +10,16 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox, QHeaderView,
 )
 from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
-from fuzzywuzzy import fuzz
 import json
+import uuid
 import geopandas as gpd
 import pandas as pd
 from qgis.core import QgsVectorLayer, QgsProject, QgsDataSourceUri
-import shortuuid
 from shapely.geometry import mapping, shape
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from rapidfuzz import process, fuzz
-
+from .fuzzy_match import fuzz, process
 from .help_panel import CollapsibleHelpMixin, resize_dialog_to_screen, configure_qgis_dialog
 from .code_helper_qgis_console import is_settlement_data_layer, process_layer
 
@@ -2044,7 +2042,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
     def _generate_settlement_short_code(self, existing_codes):
         while True:
-            code = shortuuid.uuid()[:8]
+            code = uuid.uuid4().hex[:8]
             if code not in existing_codes:
                 existing_codes.add(code)
                 return code

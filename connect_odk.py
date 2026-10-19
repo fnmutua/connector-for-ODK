@@ -1,3 +1,4 @@
+import sys
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
@@ -88,7 +89,7 @@ class ConnectODK:
                 missing.append(install_name)
 
         if missing:
-            pip_cmd = "pip install " + " ".join(missing)
+            pip_cmd = f'"{sys.executable}" -m pip install ' + " ".join(missing)
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Missing Dependencies",
@@ -108,8 +109,7 @@ class ConnectODK:
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
         required_packages = [
             "numpy", "pandas", "geopandas", "fiona", "shapely", "pyproj",
-            ("fpdf", "fpdf2"), "requests", "fuzzywuzzy", "rapidfuzz", "shortuuid",
-            "openpyxl", "xlsxwriter",
+            ("fpdf", "fpdf2"), "requests", "openpyxl", "xlsxwriter",
         ]
         self.ensure_packages_installed(required_packages)
 

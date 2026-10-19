@@ -14,9 +14,8 @@ except ImportError:
         return "Invalid geometry"
 
 from .upload import validate_and_repair_geometry
-from fpdf import FPDF
 import pyproj
-from fuzzywuzzy import process
+from .fuzzy_match import process
 from PyQt5.QtWidgets import (
     QDialog, QProgressBar, QVBoxLayout, QPushButton, QLabel, QCheckBox, QLineEdit,
     QSpinBox, QFileDialog, QHBoxLayout, QMessageBox, QGroupBox,
@@ -787,6 +786,17 @@ class ProcessGDBDialog(QDialog):
 
  
     def generate_summary_pdf(self, output_dir, layer_summary, total_layers, total_features, unmatched_layers):
+        try:
+            from fpdf import FPDF
+        except ImportError:
+            QMessageBox.warning(
+                self,
+                "Missing package",
+                "PDF reports need fpdf2 in the QGIS Python environment:\n\n"
+                f"\"{sys.executable}\" -m pip install fpdf2\n\n"
+                "Restart QGIS after installing. The other QA/QC outputs were still written.",
+            )
+            return
         pdf = FPDF(orientation="L", unit="mm", format="A4")
         pdf.add_page()
         pdf.set_font("Arial", size=12)
