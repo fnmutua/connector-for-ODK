@@ -1,3 +1,4 @@
+import re
 import requests
 import os
 from datetime import datetime
@@ -6,6 +7,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox,
     QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QApplication,
     QTableWidgetItem, QSizePolicy, QFormLayout, QStackedWidget, QTabWidget,
+    QDialogButtonBox, QHeaderView,
 )
 from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
 from fuzzywuzzy import fuzz
@@ -89,6 +91,183 @@ def _shape_from_geojson(geom_dict):
         return validate_and_repair_geometry(shape(geom_dict))
     except Exception:
         return None
+
+
+# Same ids as the KeSMIS parcel map legend. Parcel layers store the name.
+_PARCEL_LANDUSE_NAME_FIELDS = (
+    "landuse",
+    "land_use",
+    "landuse_name",
+    "land_use_type",
+    "use",
+)
+_PARCEL_LANDUSE_EXACT = {
+    "residential": 0,
+    "residence": 0,
+    "industrial": 1,
+    "industry": 1,
+    "education": 2,
+    "educational": 2,
+    "recreation": 3,
+    "recreational": 3,
+    "public purpose": 4,
+    "commercial": 5,
+    "public utility": 6,
+    "transportation": 7,
+    "transport": 7,
+    "undeveloped": 8,
+    "vacant": 8,
+    "agricultural": 9,
+    "agriculture": 9,
+}
+_PARCEL_LANDUSE_DICTIONARY = (
+    (0, "Residential"),
+    (1, "Industrial"),
+    (2, "Education"),
+    (3, "Recreation"),
+    (4, "Public Purpose"),
+    (5, "Commercial"),
+    (6, "Public Utility"),
+    (7, "Transportation"),
+    (8, "Undeveloped"),
+    (9, "Agricultural"),
+)
+_PARCEL_LANDUSE_IDS = {landuse_id for landuse_id, _label in _PARCEL_LANDUSE_DICTIONARY}
+
+
+def _normalize_landuse_label(value):
+    return re.sub(r"[\s_-]+", " ", str(value).strip().lower()).strip()
+
+
+def _numeric_landuse_id(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        if value == int(value):
+            return int(value)
+        return None
+    text = str(value).strip()
+    if re.fullmatch(r"-?\d+", text) or re.fullmatch(r"-?\d+\.0+", text):
+        return int(float(text))
+    return None
+
+
+def _landuse_display_value(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in ("nan", "none", "null"):
+        return None
+    return text
+
+
+def _suggested_landuse_id(value):
+    """Suggest a dictionary id only when the layer value matches a known name."""
+    key = _normalize_landuse_label(value)
+    if key in _PARCEL_LANDUSE_EXACT:
+        return _PARCEL_LANDUSE_EXACT[key]
+    return None
+
+
+def _row_field_value(row, field_name):
+    index = getattr(row, "index", None)
+    if index is None:
+        return None
+    target = field_name.lower()
+    for key in index:
+        if str(key).lower() == target:
+            return row[key]
+    return None
+
+
+class ParcelLanduseMatchDialog(QDialog):
+    """Let the user match parcel land-use values to the KeSMIS dictionary."""
+
+    def __init__(self, parent, rows):
+        super().__init__(parent)
+        configure_qgis_dialog(self, parent)
+        self.setWindowTitle("Match Parcel Land Use")
+        resize_dialog_to_screen(self, min_width=640, min_height=360, max_width=860, max_height=640)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "These values are in the parcel layer and are not KeSMIS land-use ids. "
+            "Match each one to the dictionary, or leave it blank. "
+            "A name is suggested only when it matches the dictionary exactly."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.table = QTableWidget(len(rows), 3)
+        self.table.setHorizontalHeaderLabels(["Value in layer", "Features", "Dictionary land use"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.NoSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+
+        self._combos = []
+        self._values = []
+        for row_index, (value, count, suggested_id) in enumerate(rows):
+            self._values.append(value)
+            value_item = QTableWidgetItem(value)
+            value_item.setFlags(Qt.ItemIsEnabled)
+            count_item = QTableWidgetItem(str(count))
+            count_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            count_item.setFlags(Qt.ItemIsEnabled)
+            self.table.setItem(row_index, 0, value_item)
+            self.table.setItem(row_index, 1, count_item)
+
+            combo = QComboBox()
+            combo.addItem("Select land use…", "unset")
+            combo.addItem("Leave blank", "blank")
+            for landuse_id, label in _PARCEL_LANDUSE_DICTIONARY:
+                combo.addItem(f"{landuse_id} — {label}", landuse_id)
+            if suggested_id is not None:
+                match_index = combo.findData(suggested_id)
+                if match_index >= 0:
+                    combo.setCurrentIndex(match_index)
+            self.table.setCellWidget(row_index, 2, combo)
+            self._combos.append(combo)
+
+        self.table.resizeRowsToContents()
+        layout.addWidget(self.table)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept_if_complete)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _accept_if_complete(self):
+        pending = []
+        for value, combo in zip(self._values, self._combos):
+            if combo.currentData() == "unset":
+                pending.append(value)
+        if pending:
+            preview = ", ".join(pending[:8])
+            if len(pending) > 8:
+                preview += f", and {len(pending) - 8} more"
+            QMessageBox.warning(
+                self,
+                "Land use not matched",
+                "Choose a dictionary land use or Leave blank for every value:\n\n" + preview,
+            )
+            return
+        self.accept()
+
+    def mapping(self):
+        """Return layer value -> landuse id, or None when the user left it blank."""
+        result = {}
+        for value, combo in zip(self._values, self._combos):
+            chosen = combo.currentData()
+            result[value] = None if chosen == "blank" else int(chosen)
+        return result
 
 def add_geojson_to_map(filepath, layer_name):
     """
@@ -1412,6 +1591,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         <h4>Field mapping</h4>
         <p>Layer fields are matched to API fields automatically. Use the filter box to search mappings and adjust API field selections in the table.</p>
+        <p><b>Parcels:</b> if the layer stores land-use names instead of ids, a matching dialog opens before submit. Match each value to the KeSMIS dictionary, or leave it blank. Names that do not match the dictionary are not assigned automatically.</p>
 
         <h4>Dry run</h4>
         <p>Enable <b>Dry Run</b> to validate a limited number of records on the server. Nothing is saved until you run a full submission.</p>
@@ -3208,6 +3388,95 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             lines.append(f"... and {len(errors) - limit} more error(s)")
         return lines
 
+    def _parcel_landuse_source_field(self):
+        """Return the layer column that holds parcel land use, if one exists."""
+        for layer_field, api_field in self.field_mapping.items():
+            if api_field and str(api_field).lower() == "landuse_id":
+                if layer_field in self.gdf.columns:
+                    return layer_field
+        for name in _PARCEL_LANDUSE_NAME_FIELDS:
+            for column in self.gdf.columns:
+                if str(column).lower() == name:
+                    return column
+        return None
+
+    def _confirm_parcel_landuse_mapping(self):
+        """Ask the user to match layer land-use names to the dictionary.
+
+        Returns a value->id map, or None when the user cancels.
+        An empty map means every value is already a dictionary id or blank.
+        """
+        source_field = self._parcel_landuse_source_field()
+        if source_field is None:
+            self.log_message(
+                "No land-use field found on this parcel layer. landuse_id will be left empty."
+            )
+            return {}
+
+        counts = {}
+        order = []
+        for idx, row in self.gdf.iterrows():
+            if idx not in self.valid_feature_indices:
+                continue
+            text = _landuse_display_value(self._convert_to_serializable(row[source_field]))
+            if text is None:
+                continue
+            coded = _numeric_landuse_id(text)
+            if coded in _PARCEL_LANDUSE_IDS:
+                continue
+            if text not in counts:
+                order.append(text)
+                counts[text] = 0
+            counts[text] += 1
+
+        if not order:
+            self.log_message(
+                f"Parcel land use in '{source_field}' is already coded. No matching needed."
+            )
+            return {}
+
+        rows = [
+            (value, counts[value], _suggested_landuse_id(value))
+            for value in order
+        ]
+        dialog = ParcelLanduseMatchDialog(self, rows)
+        if dialog.exec_() != QDialog.Accepted:
+            self.log_message("Parcel land-use matching cancelled. Nothing was submitted.")
+            return None
+
+        mapping = dialog.mapping()
+        matched = sum(1 for landuse_id in mapping.values() if landuse_id is not None)
+        blank = len(mapping) - matched
+        self.log_message(
+            f"Parcel land use: matched {matched} value(s) from '{source_field}', "
+            f"left {blank} blank."
+        )
+        return mapping
+
+    def _apply_parcel_landuse(self, feature, row, source_field, mapping):
+        raw = None
+        if source_field is not None:
+            raw = self._convert_to_serializable(row[source_field])
+        elif "landuse_id" in feature:
+            raw = feature.get("landuse_id")
+        text = _landuse_display_value(raw)
+        if text is None:
+            feature.pop("landuse_id", None)
+            return "blank"
+        if text in mapping:
+            landuse_id = mapping[text]
+            if landuse_id is None:
+                feature.pop("landuse_id", None)
+                return "blank"
+            feature["landuse_id"] = landuse_id
+            return "matched"
+        coded = _numeric_landuse_id(text)
+        if coded in _PARCEL_LANDUSE_IDS:
+            feature["landuse_id"] = coded
+            return "coded"
+        feature.pop("landuse_id", None)
+        return "blank"
+
     def submit_features(self):
         """Submit features to API in batches of 100 with progress updates."""
         try:
@@ -3239,6 +3508,15 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
             # Build feature payloads
             features = []
+            is_parcel = str(entity.get("model", "")).lower() == "parcel"
+            landuse_source_field = None
+            landuse_mapping = {}
+            landuse_counts = {"matched": 0, "coded": 0, "blank": 0}
+            if is_parcel:
+                landuse_mapping = self._confirm_parcel_landuse_mapping()
+                if landuse_mapping is None:
+                    return
+                landuse_source_field = self._parcel_landuse_source_field()
             for idx, row in self.gdf.iterrows():
                 if idx not in self.valid_feature_indices:
                     self.log_message(f"Skipping feature index {idx}: No valid parent ID found.")
@@ -3270,7 +3548,20 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     feature["geom"] = row.geometry.__geo_interface__
                 # Add isApproved property
                 feature["isApproved"] = True
+                if is_parcel:
+                    outcome = self._apply_parcel_landuse(
+                        feature, row, landuse_source_field, landuse_mapping
+                    )
+                    landuse_counts[outcome] = landuse_counts.get(outcome, 0) + 1
                 features.append(feature)
+
+            if is_parcel and features:
+                self.log_message(
+                    "Parcel land use on features to submit: "
+                    f"{landuse_counts['matched']} matched, "
+                    f"{landuse_counts['coded']} already coded, "
+                    f"{landuse_counts['blank']} blank."
+                )
 
             if not features:
                 self.log_message("No features with valid parent IDs to submit.")
