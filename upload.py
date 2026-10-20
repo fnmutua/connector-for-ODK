@@ -1037,8 +1037,14 @@ class FieldMatchingWorker(QObject):
     def run(self):
         """Perform field matching in the background, picking the best match per API field."""
         try:
-            layer_fields    = [f.name() for f in self.layer.fields()]
-            fields_to_match = layer_fields + self.pcode_fields
+            layer_fields = [f.name() for f in self.layer.fields()]
+            layer_field_names = set(layer_fields)
+            # Parent id columns are only added when the layer does not already
+            # have them, so a real County / Sub County / Ward column can win.
+            fallback_fields = [
+                name for name in self.pcode_fields if name not in layer_field_names
+            ]
+            fields_to_match = layer_fields + fallback_fields
             api_fields      = [attr["name"] for attr in self.entity.get("attributes", [])]
             field_mapping   = {}
             table_data      = []
@@ -1076,8 +1082,12 @@ class FieldMatchingWorker(QObject):
 
             for api_field, layer_list in reverse_map.items():
                 if len(layer_list) > 1:
-                    # sort by descending score, keep the top one
-                    sorted_layers = sorted(layer_list, key=lambda lf: scores[lf], reverse=True)
+                    # A column on the layer beats an injected parent-id row.
+                    sorted_layers = sorted(
+                        layer_list,
+                        key=lambda lf: (lf in layer_field_names, scores[lf]),
+                        reverse=True,
+                    )
                     for duplicate in sorted_layers[1:]:
                         field_mapping[duplicate] = None
                         # clear its entry in table_data
@@ -1400,27 +1410,10 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         connection_box.setLayout(connection_layout)
         main_layout.addWidget(connection_box)
 
-        # Layer and Parent Selection
-        layer_box = QGroupBox("Layer and Parent Selection")
+        # Import is the main task. Settlement sync stays collapsed because
+        # most settlements are already on the server.
+        layer_box = QGroupBox("Import")
         layer_layout = QVBoxLayout()
-
-        settlement_layout = QHBoxLayout()
-        self.settlement_layer_combo = QComboBox()
-        self.settlement_layer_combo.setEnabled(False)
-        self.settlement_layer_combo.currentTextChanged.connect(self._update_code_guidance)
-        self.sync_settlement_codes_button = QPushButton("Sync Settlements with KeSMIS")
-        self.sync_settlement_codes_button.clicked.connect(self.sync_settlement_codes_for_selection)
-        self.sync_settlement_codes_button.setEnabled(False)
-        self.sync_settlement_codes_button.setToolTip(
-            "Match the settlement layer to KeSMIS by geometry, map fields, then create or update records on the server."
-        )
-        settlement_layout.addWidget(QLabel("Select Settlement Layer:"))
-        settlement_layout.addWidget(self.settlement_layer_combo, 1)
-        settlement_layout.addWidget(self.sync_settlement_codes_button)
-
-        self.code_guidance_label = QLabel("")
-        self.code_guidance_label.setWordWrap(True)
-        self.code_guidance_label.setStyleSheet("color: #8a4b00;")
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
@@ -1442,13 +1435,19 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.layer_combo.currentTextChanged.connect(self.reset_data)
         self.layer_combo.currentTextChanged.connect(self._update_code_guidance)
         layer_selection_layout.addWidget(QLabel("Select Layer:"))
-        layer_selection_layout.addWidget(self.layer_combo)
+        layer_selection_layout.addWidget(self.layer_combo, 1)
         parent_selection_layout = QHBoxLayout()
         self.parent_combo = QComboBox()
         self.parent_combo.addItems(["", "settlement", "ward"])
+        self.parent_combo.blockSignals(True)
+        self.parent_combo.setCurrentText("settlement")
+        self.parent_combo.blockSignals(False)
         self.parent_combo.setEnabled(False)
+        self.parent_combo.setToolTip(
+            "Match each feature to a settlement or ward that is already in KeSMIS."
+        )
         self.parent_combo.currentTextChanged.connect(self.start_fetch_pcode_data)
-        parent_selection_layout.addWidget(QLabel("Select Parent Entity:"))
+        parent_selection_layout.addWidget(QLabel("Parent:"))
         parent_selection_layout.addWidget(self.parent_combo)
         entity_selection_layout = QHBoxLayout()
         self.entity_combo = SearchableComboBox()
@@ -1457,12 +1456,54 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.entity_combo.setPlaceholderText("Search entities...")
         entity_selection_layout.addWidget(QLabel("Select Entity:"))
         entity_selection_layout.addWidget(self.entity_combo)
-        layer_layout.addLayout(settlement_layout)
-        layer_layout.addWidget(self.code_guidance_label)
-        layer_layout.addWidget(self.progress_bar)
         layer_layout.addLayout(layer_selection_layout)
         layer_layout.addLayout(parent_selection_layout)
         layer_layout.addLayout(entity_selection_layout)
+        layer_layout.addWidget(self.progress_bar)
+
+        settlement_box = QGroupBox("Update/Upload settlements")
+        settlement_box.setCheckable(True)
+        settlement_box.setChecked(False)
+        settlement_box.setToolTip(
+            "Open only when you need to add or update settlement records. "
+            "Imported layers are matched to settlements already in KeSMIS."
+        )
+        settlement_outer = QVBoxLayout()
+        self.settlement_sync_body = QWidget()
+        settlement_body_layout = QVBoxLayout(self.settlement_sync_body)
+        settlement_body_layout.setContentsMargins(0, 0, 0, 0)
+        settlement_note = QLabel(
+            "Use this when a settlement is not already in KeSMIS. "
+            "Parcel and facility imports do not need it."
+        )
+        settlement_note.setWordWrap(True)
+        settlement_body_layout.addWidget(settlement_note)
+
+        settlement_layout = QHBoxLayout()
+        self.settlement_layer_combo = QComboBox()
+        self.settlement_layer_combo.setEnabled(False)
+        self.settlement_layer_combo.currentTextChanged.connect(self._update_code_guidance)
+        self.sync_settlement_codes_button = QPushButton("Sync Settlements with KeSMIS")
+        self.sync_settlement_codes_button.clicked.connect(self.sync_settlement_codes_for_selection)
+        self.sync_settlement_codes_button.setEnabled(False)
+        self.sync_settlement_codes_button.setToolTip(
+            "Match the settlement layer to KeSMIS by geometry, map fields, then create or update records on the server."
+        )
+        settlement_layout.addWidget(QLabel("Settlement layer:"))
+        settlement_layout.addWidget(self.settlement_layer_combo, 1)
+        settlement_layout.addWidget(self.sync_settlement_codes_button)
+        settlement_body_layout.addLayout(settlement_layout)
+
+        self.code_guidance_label = QLabel("")
+        self.code_guidance_label.setWordWrap(True)
+        self.code_guidance_label.setStyleSheet("color: #8a4b00;")
+        settlement_body_layout.addWidget(self.code_guidance_label)
+        self.settlement_sync_body.setVisible(False)
+        settlement_box.toggled.connect(self.settlement_sync_body.setVisible)
+        settlement_outer.addWidget(self.settlement_sync_body)
+        settlement_box.setLayout(settlement_outer)
+        layer_layout.addWidget(settlement_box)
+
         layer_box.setLayout(layer_layout)
         layer_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         main_layout.addWidget(layer_box)
@@ -1542,6 +1583,15 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         work_layout.setContentsMargins(0, 0, 0, 0)
         work_layout.addWidget(scroll_area)
 
+        footer = QHBoxLayout()
+        footer.setContentsMargins(8, 0, 8, 8)
+        footer.addStretch()
+        self.close_button = QPushButton("Close")
+        self.close_button.setToolTip("Close this dialog without signing out")
+        self.close_button.clicked.connect(self.close)
+        footer.addWidget(self.close_button)
+        work_layout.addLayout(footer)
+
         self._attach_collapsible_help(work_panel, self._help_html(), add_toggle_row=False)
         log_actions.addWidget(self.toggle_help_button)
 
@@ -1580,12 +1630,14 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         <h4>Quick start</h4>
         <ol>
             <li><b>Server login</b> &mdash; enter the KeSMIS URL, username, and password when prompted.</li>
-            <li><b>Settlement sync</b> &mdash; choose the settlement layer, click <b>Sync Settlements with KeSMIS</b>, review field mapping and geometry matches, then create or update records on the server.</li>
-            <li><b>Select Layer</b> &mdash; choose the QGIS vector layer to export.</li>
-            <li><b>Parent entity</b> &mdash; pick <code>settlement</code> or <code>ward</code> for spatial matching.</li>
+            <li><b>Select Layer</b> &mdash; choose the parcels, facilities, or other vector layer to import.</li>
+            <li><b>Parent</b> &mdash; leave this on <code>settlement</code> so each feature is matched to a settlement already in KeSMIS. Use <code>ward</code> only when the layer has no settlement parent.</li>
             <li><b>Select Entity</b> &mdash; choose the API entity/model to submit to.</li>
             <li>Review <b>Field Mapping</b>, then click <b>Submit Data to KeSMIS</b>.</li>
         </ol>
+
+        <h4>Update/Upload settlements</h4>
+        <p>Open <b>Update/Upload settlements</b> only when a settlement is missing from KeSMIS or its record needs to change. Choose the settlement layer and click <b>Sync Settlements with KeSMIS</b>.</p>
 
         <h4>Field mapping</h4>
         <p>Layer fields are matched to API fields automatically. Use the filter box to search mappings and adjust API field selections in the table.</p>
@@ -1901,20 +1953,13 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 )
             self.sync_settlement_codes_button.setEnabled(bool(self.token))
         elif settlement_layers:
-            layer_names = ", ".join(layer.name() for layer in settlement_layers)
             self.code_guidance_label.setText(
-                _join_ui_text(
-                    "Settlement layer(s) detected: ",
-                    layer_names,
-                    ". Select a settlement layer from the dropdown above, then click "
-                    "Sync Settlements with KeSMIS.",
-                )
+                "Choose the settlement layer, then click Sync Settlements with KeSMIS."
             )
             self.sync_settlement_codes_button.setEnabled(False)
         else:
             self.code_guidance_label.setText(
-                "Select a layer to import. A code field is required; you will be prompted "
-                "to generate codes if the selected layer does not have one."
+                "No settlement layer is loaded in this project."
             )
             self.sync_settlement_codes_button.setEnabled(False)
 

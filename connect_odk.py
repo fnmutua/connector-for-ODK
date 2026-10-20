@@ -109,7 +109,7 @@ class ConnectODK:
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
         required_packages = [
             "numpy", "pandas", "geopandas", "fiona", "shapely", "pyproj",
-            ("fpdf", "fpdf2"), "requests", "openpyxl", "xlsxwriter",
+            ("fpdf", "fpdf2"), "requests", "rapidfuzz", "openpyxl", "xlsxwriter",
         ]
         self.ensure_packages_installed(required_packages)
 
