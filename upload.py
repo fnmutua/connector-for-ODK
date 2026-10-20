@@ -25,7 +25,7 @@ from .code_helper_qgis_console import is_settlement_data_layer, process_layer
 
 
 IMPORT_HISTORY_HINT = (
-    "To review or undo this import, open KeSMIS: Data > Import > Import History."
+    "To review or undo this import, open KeSMIS: Data > Import > History."
 )
 
 
