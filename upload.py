@@ -24,6 +24,11 @@ from .help_panel import CollapsibleHelpMixin, resize_dialog_to_screen, configure
 from .code_helper_qgis_console import is_settlement_data_layer, process_layer
 
 
+IMPORT_HISTORY_HINT = (
+    "To review or undo this import, open KeSMIS: Data > Import > Import History."
+)
+
+
 def _join_ui_text(*parts):
     """Join static UI label fragments (display only, not SQL)."""
     return "".join(str(part) for part in parts)
@@ -2569,6 +2574,14 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             features.append(filtered)
         return features
 
+    def _import_batch_fields(self, label):
+        """Fields that group one submit into a single KeSMIS import."""
+        return {
+            "importBatchId": str(uuid.uuid4()),
+            "importSource": "qgis-connector",
+            "importLabel": label,
+        }
+
     def _submit_upsert_batches(
         self,
         model,
@@ -2578,6 +2591,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         progress_start=0,
         progress_end=100,
         manage_visibility=True,
+        batch_fields=None,
     ):
         """Submit features to KeSMIS import/upsert in batches."""
         if not features:
@@ -2622,6 +2636,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 payload = {"model": model, "data": batch}
                 if dry_run:
                     payload["dryRun"] = True
+                elif batch_fields:
+                    payload.update(batch_fields)
                 resp = requests.post(
                     f"{url}/api/v1/data/import/upsert",
                     json=payload,
@@ -2895,6 +2911,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 progress_start=85,
                 progress_end=98,
                 manage_visibility=False,
+                batch_fields=None if is_dry_run else self._import_batch_fields(layer_name),
             )
 
             if is_dry_run:
@@ -2938,7 +2955,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 f"Local codes replaced: {local_updated}\n"
                 f"Local codes unchanged: {unchanged}\n"
                 f"New local codes (created): {generated}\n\n"
-                f"Synced features are marked in the '{self.SETTLEMENT_SYNC_FIELD}' field."
+                f"Synced features are marked in the '{self.SETTLEMENT_SYNC_FIELD}' field.\n\n"
+                f"{IMPORT_HISTORY_HINT}"
             )
             self.log_message(summary.replace("\n", " "))
             if errors:
@@ -3636,6 +3654,9 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             }
             all_inserted = all_updated = all_failed = 0
             all_errors = []
+            # One id for every request of this submit, so KeSMIS records it as
+            # a single import that can be reviewed and undone.
+            batch_fields = None if is_dry_run else self._import_batch_fields(layer.name())
 
             # Submit in batches
             for start in range(0, total, batch_size):
@@ -3647,6 +3668,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     payload = {"model": entity["model"], "data": batch}
                     if is_dry_run:
                         payload["dryRun"] = True
+                    else:
+                        payload.update(batch_fields)
                     resp = requests.post(
                         f"{url}/api/v1/data/import/upsert",
                         json=payload,
@@ -3681,6 +3704,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 dialog_title = "Dry Run Complete"
             else:
                 summary = f"Done: {all_inserted} inserted, {all_updated} updated, {all_failed} failed."
+                if all_inserted or all_updated:
+                    summary += f"\n\n{IMPORT_HISTORY_HINT}"
                 dialog_title = "Import Complete"
 
             self.log_message(summary.replace("\n", " "))
