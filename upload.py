@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem, QSizePolicy, QFormLayout, QStackedWidget, QTabWidget,
     QDialogButtonBox, QHeaderView,
 )
+from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
 import json
 import uuid
@@ -27,6 +28,44 @@ from .code_helper_qgis_console import is_settlement_data_layer, process_layer
 IMPORT_HISTORY_HINT = (
     "To review or undo this import, open KeSMIS: Data > Import > History."
 )
+
+
+class ImportWaitDialog(QDialog):
+    """Tell the user to wait while a KeSMIS import is running."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        configure_qgis_dialog(self, parent)
+        self.setWindowTitle("Importing to KeSMIS")
+        self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        self._label = QLabel("Please wait. The import is running.")
+        self._label.setWordWrap(True)
+        self._label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._label)
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 0)
+        self._bar.setTextVisible(False)
+        layout.addWidget(self._bar)
+        self.setFixedSize(440, 140)
+
+    def update_status(self, message, value=None, maximum=None):
+        self._label.setText(message)
+        if maximum is None:
+            self._bar.setRange(0, 0)
+            self._bar.setTextVisible(False)
+        else:
+            self._bar.setRange(0, maximum)
+            self._bar.setValue(0 if value is None else int(value))
+            self._bar.setTextVisible(True)
+        self.show()
+        self.raise_()
+        self.repaint()
+        QApplication.processEvents()
+
+    def closeEvent(self, event):
+        event.ignore()
 
 
 def _join_ui_text(*parts):
@@ -236,8 +275,12 @@ class ParcelLanduseMatchDialog(QDialog):
                 match_index = combo.findData(suggested_id)
                 if match_index >= 0:
                     combo.setCurrentIndex(match_index)
+            combo.currentIndexChanged.connect(
+                lambda _index, row=row_index, box=combo: self._style_landuse_row(row, box)
+            )
             self.table.setCellWidget(row_index, 2, combo)
             self._combos.append(combo)
+            self._style_landuse_row(row_index, combo)
 
         self.table.resizeRowsToContents()
         layout.addWidget(self.table)
@@ -246,6 +289,27 @@ class ParcelLanduseMatchDialog(QDialog):
         buttons.accepted.connect(self._accept_if_complete)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _style_landuse_row(self, row_index, combo):
+        """Keep unmatched rows red until the user picks a land use or leaves it blank."""
+        unset = combo.currentData() == "unset"
+        if unset:
+            foreground = QBrush(QColor("#9b1c1c"))
+            background = QBrush(QColor("#fde8e8"))
+            combo.setStyleSheet(
+                "QComboBox { color: #9b1c1c; font-weight: 600; background-color: #fde8e8; }"
+                "QComboBox QAbstractItemView { color: #1a1a1a; background-color: white; font-weight: normal; }"
+            )
+        else:
+            foreground = QBrush(QColor("#1a1a1a"))
+            background = QBrush(QColor("#ffffff"))
+            combo.setStyleSheet("")
+        for column in (0, 1):
+            item = self.table.item(row_index, column)
+            if item is None:
+                continue
+            item.setForeground(foreground)
+            item.setBackground(background)
 
     def _accept_if_complete(self):
         pending = []
@@ -1005,14 +1069,6 @@ class Worker(QObject):
                                 self.progress.emit(min(progress, 100))  # up to 100% for pcode
 
             # ── FINALIZE ─────────────────────────────────────────────────
-            if pcode_entity_data:
-                self.log.emit(
-                    f"Data fetched successfully for {len(valid_feature_indices)} rows "
-                    f"with parent entity '{self.parent_entity_name}'."
-                )
-            else:
-                self.log.emit(f"No data fetched for parent entity '{self.parent_entity_name}'.")
-
             self.result.emit(pcode_entity_data, valid_feature_indices)
             self.finished.emit()
 
@@ -1454,6 +1510,10 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.parent_combo.currentTextChanged.connect(self.start_fetch_pcode_data)
         parent_selection_layout.addWidget(QLabel("Parent:"))
         parent_selection_layout.addWidget(self.parent_combo)
+        self.match_status_label = QLabel("")
+        self.match_status_label.setWordWrap(True)
+        self.match_status_label.setVisible(False)
+        self.match_status_label.setStyleSheet("color: #8a4b00;")
         entity_selection_layout = QHBoxLayout()
         self.entity_combo = SearchableComboBox()
         self.entity_combo.setEnabled(False)
@@ -1463,6 +1523,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         entity_selection_layout.addWidget(self.entity_combo)
         layer_layout.addLayout(layer_selection_layout)
         layer_layout.addLayout(parent_selection_layout)
+        layer_layout.addWidget(self.match_status_label)
         layer_layout.addLayout(entity_selection_layout)
         layer_layout.addWidget(self.progress_bar)
 
@@ -1636,7 +1697,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         <ol>
             <li><b>Server login</b> &mdash; enter the KeSMIS URL, username, and password when prompted.</li>
             <li><b>Select Layer</b> &mdash; choose the parcels, facilities, or other vector layer to import.</li>
-            <li><b>Parent</b> &mdash; leave this on <code>settlement</code> so each feature is matched to a settlement already in KeSMIS. Use <code>ward</code> only when the layer has no settlement parent.</li>
+            <li><b>Parent</b> &mdash; leave this on <code>settlement</code> so each feature is matched to a settlement already in KeSMIS. Use <code>ward</code> only when the layer has no settlement parent. Features that do not overlap a parent, and have no usable pcode, are left out. The dialog reports how many will be uploaded before you submit.</li>
             <li><b>Select Entity</b> &mdash; choose the API entity/model to submit to.</li>
             <li>Review <b>Field Mapping</b>, then click <b>Submit Data to KeSMIS</b>.</li>
         </ol>
@@ -3052,6 +3113,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.field_mapping = {}
         self.mapping_table.setRowCount(0)
         self.submit_button.setEnabled(False)
+        self._clear_match_status()
+        self.update_submit_button_text()
 
         layer = self.layer_combo.currentData()
         if layer:
@@ -3188,6 +3251,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         self.pcode_entity_data = {}
         self.valid_feature_indices = []
+        self._clear_match_status()
+        self.update_submit_button_text()
         if source_choice == "local":
             self.log_message(
                 f"Starting pcode data fetch for parent entity '{parent_entity}' "
@@ -3228,10 +3293,97 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         """Handle results from background worker."""
         self.pcode_entity_data = pcode_entity_data
         self.valid_feature_indices = valid_feature_indices
-        if not pcode_entity_data:
-            self.submit_button.setEnabled(False)
+        self.submit_button.setEnabled(bool(pcode_entity_data))
+        self._report_parent_match()
+
+    def _clear_match_status(self):
+        """Hide the parent-match summary until a new match finishes."""
+        self.match_status_label.clear()
+        self.match_status_label.setVisible(False)
+
+    def _parent_match_name(self):
+        parent = (self.parent_combo.currentText() or "settlement").strip().lower()
+        if parent not in ("settlement", "ward"):
+            return "settlement"
+        return parent
+
+    def _feature_match_label(self, idx):
+        """Name a left-out feature by code, then pcode, then its row index."""
+        if self.gdf is None or idx not in self.gdf.index:
+            return f"feature {idx}"
+        row = self.gdf.loc[idx]
+        columns = row.index if hasattr(row, "index") else []
+        for key in ("code", "pcode"):
+            if key not in columns:
+                continue
+            value = self._convert_to_serializable(row[key])
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text and text.lower() != "nan":
+                return text
+        return f"feature {idx}"
+
+    def _report_parent_match(self):
+        """Tell the user how many features matched a parent and which were left out."""
+        if self.gdf is None or self.gdf.empty:
+            self._clear_match_status()
+            self.update_submit_button_text()
+            return
+
+        parent = self._parent_match_name()
+        matched_set = {idx for idx in self.valid_feature_indices if idx in self.gdf.index}
+        total = len(self.gdf)
+        matched = len(matched_set)
+        left_out_indices = [idx for idx in self.gdf.index if idx not in matched_set]
+        left_out = len(left_out_indices)
+        self.update_submit_button_text()
+
+        if left_out == 0:
+            self._clear_match_status()
+            self.log_message(f"{matched} of {total} features matched a {parent}.")
+            return
+
+        next_step = (
+            f"Check that those features overlap a {parent} boundary, "
+            "or add the missing settlement under Update/Upload settlements, then match again."
+            if parent == "settlement"
+            else f"Check that those features overlap a {parent} boundary, then match again."
+        )
+        if matched == 0:
+            summary = (
+                f"0 of {total} features matched a {parent}.\n\n"
+                f"None overlap a KeSMIS {parent} or have a usable pcode, "
+                "so nothing will be uploaded.\n\n"
+                f"{next_step}"
+            )
+            self.match_status_label.setText(
+                f"No features matched a {parent}. Nothing will be uploaded."
+            )
+            title = "No features matched"
         else:
-            self.submit_button.setEnabled(True)
+            summary = (
+                f"{matched} of {total} features matched a {parent} and can be uploaded.\n\n"
+                f"{left_out} do not overlap any KeSMIS {parent} and have no usable pcode, "
+                "so they will be left out.\n\n"
+                f"{next_step}"
+            )
+            self.match_status_label.setText(
+                f"{matched} of {total} matched a {parent}. {left_out} will not be uploaded."
+            )
+            title = "Some features will be left out"
+        self.match_status_label.setVisible(True)
+
+        cap = 12
+        labels = [self._feature_match_label(idx) for idx in left_out_indices[:cap]]
+        extra = left_out - len(labels)
+        listed = ", ".join(labels)
+        if extra:
+            listed += f", and {extra} more"
+        self.log_message(
+            f"{matched} of {total} features matched a {parent}. Left out: {listed}."
+        )
+        QMessageBox.warning(self, title, summary)
 
     def on_worker_finished(self):
         """Clean up after worker finishes."""
@@ -3553,21 +3705,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
             # Disable UI and prepare progress bar
             self.submit_button.setEnabled(False)
-            # Process CRS and geometries
-            try:
-                srid = layer.crs().postgisSrid()
-                if self.gdf.crs is None:
-                    self.gdf.set_crs(epsg=srid, inplace=True)
-                    self.log_message("No CRS defined for GeoDataFrame. Using layer CRS.")
-                self.gdf = self.gdf.to_crs(epsg=4326)
-                self.gdf['geometry'] = self.gdf['geometry'].apply(self.to_2d)
-                self.log_message("Z dimension dropped and GeoDataFrame reprojected to EPSG:4326.")
-            except Exception as e:
-                self.log_message(f"Error reprojecting or processing geometries: {e}")
-                QMessageBox.critical(self, "Geometry Error", f"Failed to reproject or process geometries: {e}")
-                return
 
-            # Build feature payloads
             features = []
             is_parcel = str(entity.get("model", "")).lower() == "parcel"
             landuse_source_field = None
@@ -3578,9 +3716,28 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 if landuse_mapping is None:
                     return
                 landuse_source_field = self._parcel_landuse_source_field()
+
+            # Process CRS and geometries
+            self._show_import_wait("Please wait. Preparing the layer for import…")
+            try:
+                srid = layer.crs().postgisSrid()
+                if self.gdf.crs is None:
+                    self.gdf.set_crs(epsg=srid, inplace=True)
+                    self.log_message("No CRS defined for GeoDataFrame. Using layer CRS.")
+                self.gdf = self.gdf.to_crs(epsg=4326)
+                self.gdf['geometry'] = self.gdf['geometry'].apply(self.to_2d)
+                self.log_message("Z dimension dropped and GeoDataFrame reprojected to EPSG:4326.")
+            except Exception as e:
+                self.log_message(f"Error reprojecting or processing geometries: {e}")
+                self._hide_import_wait()
+                QMessageBox.critical(self, "Geometry Error", f"Failed to reproject or process geometries: {e}")
+                return
+
+            # Build feature payloads
+            skipped = 0
             for idx, row in self.gdf.iterrows():
                 if idx not in self.valid_feature_indices:
-                    self.log_message(f"Skipping feature index {idx}: No valid parent ID found.")
+                    skipped += 1
                     continue
 
                 feature = {}
@@ -3624,8 +3781,15 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     f"{landuse_counts['blank']} blank."
                 )
 
+            if skipped and features:
+                self.log_message(
+                    f"Submitting {len(features)} feature(s). "
+                    f"{skipped} left out because they do not match a {self._parent_match_name()}."
+                )
+
             if not features:
                 self.log_message("No features with valid parent IDs to submit.")
+                self._hide_import_wait()
                 QMessageBox.warning(self, "No Valid Features", "No features with valid parent IDs were found for submission.")
                 return
 
@@ -3644,9 +3808,16 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             # Batch submission setup
             batch_size = 100
             total = len(features)
+            batch_count = (total + batch_size - 1) // batch_size
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
             self.progress_bar.setVisible(True)
+            wait_action = "Validating on KeSMIS" if is_dry_run else "Importing to KeSMIS"
+            self._show_import_wait(
+                f"Please wait. {wait_action}…",
+                value=0,
+                maximum=batch_count,
+            )
 
             headers = {
                 "Authorization": f"Bearer {self.token}",
@@ -3664,6 +3835,13 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 batch_num = start // batch_size + 1
                 action = "Validating batch" if is_dry_run else "Submitting batch"
                 self.log_message(f"{action} {batch_num} ({start+1}–{min(start+batch_size, total)} of {total})…")
+                self._show_import_wait(
+                    f"Please wait. {wait_action}.\n"
+                    f"Batch {batch_num} of {batch_count} "
+                    f"({start + 1}–{min(start + batch_size, total)} of {total}).",
+                    value=batch_num - 1,
+                    maximum=batch_count,
+                )
                 try:
                     payload = {"model": entity["model"], "data": batch}
                     if is_dry_run:
@@ -3689,10 +3867,17 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 # Update progress
                 percent = int((start + len(batch)) / total * 100)
                 self.progress_bar.setValue(percent)
+                self._show_import_wait(
+                    f"Please wait. {wait_action}.\n"
+                    f"Finished batch {batch_num} of {batch_count}.",
+                    value=batch_num,
+                    maximum=batch_count,
+                )
 
             # Finalize
             self.progress_bar.setValue(100)
             self.progress_bar.setVisible(False)
+            self._hide_import_wait()
 
             if is_dry_run:
                 summary = (
@@ -3721,18 +3906,40 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         except Exception as e:
             self.log_message(f"Error submitting features: {e}")
+            self._hide_import_wait()
             QMessageBox.critical(self, "Error", str(e))
 
         finally:
+            self._hide_import_wait()
             self.submit_button.setEnabled(True)
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setVisible(False)
 
+    def _show_import_wait(self, message, value=None, maximum=None):
+        """Show the please-wait dialog and let it paint before more work runs."""
+        if getattr(self, "_import_wait_dialog", None) is None:
+            self._import_wait_dialog = ImportWaitDialog(self)
+        self._import_wait_dialog.update_status(message, value=value, maximum=maximum)
+
+    def _hide_import_wait(self):
+        dialog = getattr(self, "_import_wait_dialog", None)
+        if dialog is None:
+            return
+        dialog.hide()
+        dialog.deleteLater()
+        self._import_wait_dialog = None
+        QApplication.processEvents()
+
     def update_submit_button_text(self):
-        """Update submit button text based on dry run mode."""
+        """Update submit button text based on dry run mode and match coverage."""
         if self.dry_run_checkbox.isChecked():
             limit = self.dry_run_spinbox.value()
             self.submit_button.setText(f"Validate on KeSMIS (Dry Run: {limit} records)")
+            return
+        total = len(self.gdf) if self.gdf is not None else 0
+        matched = len({idx for idx in self.valid_feature_indices if self.gdf is not None and idx in self.gdf.index})
+        if total and 0 < matched < total:
+            self.submit_button.setText(f"Submit {matched} of {total} to KeSMIS")
         else:
             self.submit_button.setText("Submit Data to KeSMIS")
     
