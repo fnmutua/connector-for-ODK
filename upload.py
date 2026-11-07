@@ -29,6 +29,10 @@ IMPORT_HISTORY_HINT = (
     "To review or undo this import, open KeSMIS: Data > Import > History."
 )
 
+# Parcel polygons are heavy; 30s was timing out around batch 100 on large imports.
+IMPORT_UPSERT_TIMEOUT_SECONDS = 180
+IMPORT_UPSERT_RETRIES = 2
+
 
 class ImportWaitDialog(QDialog):
     """Tell the user to wait while a KeSMIS import is running."""
@@ -143,6 +147,7 @@ _PARCEL_LANDUSE_NAME_FIELDS = (
     "land_use_type",
     "use",
 )
+# Handbook 2025 §3.4.3 classes, plus legacy import spellings.
 _PARCEL_LANDUSE_EXACT = {
     "residential": 0,
     "residence": 0,
@@ -155,24 +160,30 @@ _PARCEL_LANDUSE_EXACT = {
     "public purpose": 4,
     "commercial": 5,
     "public utility": 6,
+    "public utilities": 6,
     "transportation": 7,
     "transport": 7,
+    "conservation": 8,
     "undeveloped": 8,
     "vacant": 8,
     "agricultural": 9,
     "agriculture": 9,
+    "mixed use": 10,
+    "mixed": 10,
+    "mixed-use": 10,
 }
 _PARCEL_LANDUSE_DICTIONARY = (
     (0, "Residential"),
     (1, "Industrial"),
-    (2, "Education"),
-    (3, "Recreation"),
+    (2, "Educational"),
+    (3, "Recreational"),
     (4, "Public Purpose"),
     (5, "Commercial"),
-    (6, "Public Utility"),
+    (6, "Public Utilities"),
     (7, "Transportation"),
-    (8, "Undeveloped"),
+    (8, "Conservation"),
     (9, "Agricultural"),
+    (10, "Mixed use"),
 )
 _PARCEL_LANDUSE_IDS = {landuse_id for landuse_id, _label in _PARCEL_LANDUSE_DICTIONARY}
 
@@ -207,12 +218,63 @@ def _landuse_display_value(value):
     return text
 
 
-def _suggested_landuse_id(value):
+def _suggested_landuse_id(value, alias_map=None):
     """Suggest a dictionary id only when the layer value matches a known name."""
     key = _normalize_landuse_label(value)
+    if alias_map and key in alias_map:
+        return alias_map[key]
     if key in _PARCEL_LANDUSE_EXACT:
         return _PARCEL_LANDUSE_EXACT[key]
     return None
+
+
+def _build_landuse_alias_map(dictionary):
+    """Map normalised labels and aliases to landuse ids."""
+    alias_map = {}
+    for landuse_id, label, aliases in dictionary:
+        alias_map[_normalize_landuse_label(label)] = landuse_id
+        for alias in aliases:
+            key = _normalize_landuse_label(alias)
+            if key:
+                alias_map[key] = landuse_id
+    return alias_map
+
+
+def _fetch_kesmis_landuse_dictionary(url, token):
+    """Load active land-use types from KeSMIS, or None when unavailable."""
+    if not url or not token:
+        return None
+    try:
+        response = requests.get(
+            f"{url.rstrip('/')}/api/v1/landuse-types",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "x-access-token": token,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        body = response.json() if response.content else {}
+        rows = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return None
+        dictionary = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            landuse_id = row.get("id")
+            label = str(row.get("label") or row.get("use") or "").strip()
+            if landuse_id is None or not label:
+                continue
+            aliases = [
+                part.strip()
+                for part in str(row.get("aliases") or "").split(",")
+                if part.strip()
+            ]
+            dictionary.append((int(landuse_id), label, aliases))
+        return dictionary or None
+    except Exception:
+        return None
 
 
 def _row_field_value(row, field_name):
@@ -229,11 +291,15 @@ def _row_field_value(row, field_name):
 class ParcelLanduseMatchDialog(QDialog):
     """Let the user match parcel land-use values to the KeSMIS dictionary."""
 
-    def __init__(self, parent, rows):
+    def __init__(self, parent, rows, dictionary=None):
         super().__init__(parent)
         configure_qgis_dialog(self, parent)
         self.setWindowTitle("Match Parcel Land Use")
         resize_dialog_to_screen(self, min_width=640, min_height=360, max_width=860, max_height=640)
+        dictionary = dictionary or [
+            (landuse_id, label, ())
+            for landuse_id, label in _PARCEL_LANDUSE_DICTIONARY
+        ]
 
         layout = QVBoxLayout(self)
         intro = QLabel(
@@ -269,7 +335,7 @@ class ParcelLanduseMatchDialog(QDialog):
             combo = QComboBox()
             combo.addItem("Select land use…", "unset")
             combo.addItem("Leave blank", "blank")
-            for landuse_id, label in _PARCEL_LANDUSE_DICTIONARY:
+            for landuse_id, label, _aliases in dictionary:
                 combo.addItem(f"{landuse_id} — {label}", landuse_id)
             if suggested_id is not None:
                 match_index = combo.findData(suggested_id)
@@ -2643,6 +2709,29 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             "importLabel": label,
         }
 
+    def _post_import_upsert(self, url, payload, headers):
+        """POST one import batch, retrying on read timeouts."""
+        last_error = None
+        attempts = IMPORT_UPSERT_RETRIES + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return requests.post(
+                    f"{url}/api/v1/data/import/upsert",
+                    json=payload,
+                    headers=headers,
+                    timeout=IMPORT_UPSERT_TIMEOUT_SECONDS,
+                )
+            except (requests.Timeout, requests.ConnectionError) as error:
+                last_error = error
+                if attempt >= attempts:
+                    break
+                self.log_message(
+                    f"Import request timed out or dropped "
+                    f"(attempt {attempt}/{attempts}); retrying…"
+                )
+                QApplication.processEvents()
+        raise last_error
+
     def _submit_upsert_batches(
         self,
         model,
@@ -2699,12 +2788,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     payload["dryRun"] = True
                 elif batch_fields:
                     payload.update(batch_fields)
-                resp = requests.post(
-                    f"{url}/api/v1/data/import/upsert",
-                    json=payload,
-                    headers=headers,
-                    timeout=60,
-                )
+                resp = self._post_import_upsert(url, payload, headers)
                 resp.raise_for_status()
                 data = resp.json()
                 all_inserted += data.get("insertedCount", 0)
@@ -3613,6 +3697,22 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     return column
         return None
 
+    def _parcel_landuse_dictionary(self):
+        """Active KeSMIS land-use types, with a built-in fallback."""
+        fetched = _fetch_kesmis_landuse_dictionary(self.server_url, self.token)
+        if fetched:
+            self.log_message(
+                f"Loaded {len(fetched)} land-use type(s) from KeSMIS."
+            )
+            return fetched
+        self.log_message(
+            "Could not load land-use types from KeSMIS; using the built-in list."
+        )
+        return [
+            (landuse_id, label, ())
+            for landuse_id, label in _PARCEL_LANDUSE_DICTIONARY
+        ]
+
     def _confirm_parcel_landuse_mapping(self):
         """Ask the user to match layer land-use names to the dictionary.
 
@@ -3626,6 +3726,10 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             )
             return {}
 
+        dictionary = self._parcel_landuse_dictionary()
+        self._parcel_landuse_ids = {landuse_id for landuse_id, _label, _aliases in dictionary}
+        alias_map = _build_landuse_alias_map(dictionary)
+
         counts = {}
         order = []
         for idx, row in self.gdf.iterrows():
@@ -3635,7 +3739,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             if text is None:
                 continue
             coded = _numeric_landuse_id(text)
-            if coded in _PARCEL_LANDUSE_IDS:
+            if coded in self._parcel_landuse_ids:
                 continue
             if text not in counts:
                 order.append(text)
@@ -3649,10 +3753,10 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             return {}
 
         rows = [
-            (value, counts[value], _suggested_landuse_id(value))
+            (value, counts[value], _suggested_landuse_id(value, alias_map))
             for value in order
         ]
-        dialog = ParcelLanduseMatchDialog(self, rows)
+        dialog = ParcelLanduseMatchDialog(self, rows, dictionary=dictionary)
         if dialog.exec_() != QDialog.Accepted:
             self.log_message("Parcel land-use matching cancelled. Nothing was submitted.")
             return None
@@ -3684,7 +3788,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             feature["landuse_id"] = landuse_id
             return "matched"
         coded = _numeric_landuse_id(text)
-        if coded in _PARCEL_LANDUSE_IDS:
+        valid_ids = getattr(self, "_parcel_landuse_ids", None) or _PARCEL_LANDUSE_IDS
+        if coded in valid_ids:
             feature["landuse_id"] = coded
             return "coded"
         feature.pop("landuse_id", None)
@@ -3848,18 +3953,20 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                         payload["dryRun"] = True
                     else:
                         payload.update(batch_fields)
-                    resp = requests.post(
-                        f"{url}/api/v1/data/import/upsert",
-                        json=payload,
-                        headers=headers,
-                        timeout=30
-                    )
+                    resp = self._post_import_upsert(url, payload, headers)
                     resp.raise_for_status()
                     data = resp.json()
                     all_inserted += data.get("insertedCount", 0)
                     all_updated += data.get("updatedCount", 0)
                     all_failed += data.get("failedCount", 0)
                     all_errors.extend(data.get("errors", []))
+                except requests.Timeout as e:
+                    self.log_message(
+                        f"Batch {batch_num} timed out after "
+                        f"{IMPORT_UPSERT_TIMEOUT_SECONDS}s "
+                        f"({IMPORT_UPSERT_RETRIES + 1} attempt(s)): {e}"
+                    )
+                    all_failed += len(batch)
                 except Exception as e:
                     self.log_message(f"Batch {batch_num} failed entirely: {e}")
                     all_failed += len(batch)

@@ -72,10 +72,7 @@ ODK_HIGH_SKIP_BATCH_SIZE = 5
 try:
     import geopandas as gpd
     import pandas as pd
-    import shortuuid
     from shapely.geometry import mapping, shape
-    from fuzzywuzzy import fuzz
-    from rapidfuzz import process, fuzz
 except ImportError:
     # These are optional and only needed for certain features
     pass

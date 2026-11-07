@@ -1,3 +1,4 @@
+import re
 import requests
 import os
 from datetime import datetime
@@ -6,22 +7,69 @@ from PyQt5.QtWidgets import (
     QLineEdit, QSpinBox, QFileDialog, QComboBox, QHBoxLayout, QMessageBox,
     QGroupBox, QTextEdit, QScrollArea, QGridLayout, QWidget, QTableWidget, QApplication,
     QTableWidgetItem, QSizePolicy, QFormLayout, QStackedWidget, QTabWidget,
+    QDialogButtonBox, QHeaderView,
 )
+from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtCore import QVariant, QSettings, Qt, QThread, pyqtSignal, QObject, QTimer
-from fuzzywuzzy import fuzz
 import json
+import uuid
 import geopandas as gpd
 import pandas as pd
 from qgis.core import QgsVectorLayer, QgsProject, QgsDataSourceUri
-import shortuuid
 from shapely.geometry import mapping, shape
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from rapidfuzz import process, fuzz
-
+from .fuzzy_match import fuzz, process
 from .help_panel import CollapsibleHelpMixin, resize_dialog_to_screen, configure_qgis_dialog
 from .code_helper_qgis_console import is_settlement_data_layer, process_layer
+
+
+IMPORT_HISTORY_HINT = (
+    "To review or undo this import, open KeSMIS: Data > Import > History."
+)
+
+# Parcel polygons are heavy; 30s was timing out around batch 100 on large imports.
+IMPORT_UPSERT_TIMEOUT_SECONDS = 180
+IMPORT_UPSERT_RETRIES = 2
+
+
+class ImportWaitDialog(QDialog):
+    """Tell the user to wait while a KeSMIS import is running."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        configure_qgis_dialog(self, parent)
+        self.setWindowTitle("Importing to KeSMIS")
+        self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        self._label = QLabel("Please wait. The import is running.")
+        self._label.setWordWrap(True)
+        self._label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._label)
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 0)
+        self._bar.setTextVisible(False)
+        layout.addWidget(self._bar)
+        self.setFixedSize(440, 140)
+
+    def update_status(self, message, value=None, maximum=None):
+        self._label.setText(message)
+        if maximum is None:
+            self._bar.setRange(0, 0)
+            self._bar.setTextVisible(False)
+        else:
+            self._bar.setRange(0, maximum)
+            self._bar.setValue(0 if value is None else int(value))
+            self._bar.setTextVisible(True)
+        self.show()
+        self.raise_()
+        self.repaint()
+        QApplication.processEvents()
+
+    def closeEvent(self, event):
+        event.ignore()
 
 
 def _join_ui_text(*parts):
@@ -89,6 +137,270 @@ def _shape_from_geojson(geom_dict):
         return validate_and_repair_geometry(shape(geom_dict))
     except Exception:
         return None
+
+
+# Same ids as the KeSMIS parcel map legend. Parcel layers store the name.
+_PARCEL_LANDUSE_NAME_FIELDS = (
+    "landuse",
+    "land_use",
+    "landuse_name",
+    "land_use_type",
+    "use",
+)
+# Handbook 2025 §3.4.3 classes, plus legacy import spellings.
+_PARCEL_LANDUSE_EXACT = {
+    "residential": 0,
+    "residence": 0,
+    "industrial": 1,
+    "industry": 1,
+    "education": 2,
+    "educational": 2,
+    "recreation": 3,
+    "recreational": 3,
+    "public purpose": 4,
+    "commercial": 5,
+    "public utility": 6,
+    "public utilities": 6,
+    "transportation": 7,
+    "transport": 7,
+    "conservation": 8,
+    "undeveloped": 8,
+    "vacant": 8,
+    "agricultural": 9,
+    "agriculture": 9,
+    "mixed use": 10,
+    "mixed": 10,
+    "mixed-use": 10,
+}
+_PARCEL_LANDUSE_DICTIONARY = (
+    (0, "Residential"),
+    (1, "Industrial"),
+    (2, "Educational"),
+    (3, "Recreational"),
+    (4, "Public Purpose"),
+    (5, "Commercial"),
+    (6, "Public Utilities"),
+    (7, "Transportation"),
+    (8, "Conservation"),
+    (9, "Agricultural"),
+    (10, "Mixed use"),
+)
+_PARCEL_LANDUSE_IDS = {landuse_id for landuse_id, _label in _PARCEL_LANDUSE_DICTIONARY}
+
+
+def _normalize_landuse_label(value):
+    return re.sub(r"[\s_-]+", " ", str(value).strip().lower()).strip()
+
+
+def _numeric_landuse_id(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        if value == int(value):
+            return int(value)
+        return None
+    text = str(value).strip()
+    if re.fullmatch(r"-?\d+", text) or re.fullmatch(r"-?\d+\.0+", text):
+        return int(float(text))
+    return None
+
+
+def _landuse_display_value(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in ("nan", "none", "null"):
+        return None
+    return text
+
+
+def _suggested_landuse_id(value, alias_map=None):
+    """Suggest a dictionary id only when the layer value matches a known name."""
+    key = _normalize_landuse_label(value)
+    if alias_map and key in alias_map:
+        return alias_map[key]
+    if key in _PARCEL_LANDUSE_EXACT:
+        return _PARCEL_LANDUSE_EXACT[key]
+    return None
+
+
+def _build_landuse_alias_map(dictionary):
+    """Map normalised labels and aliases to landuse ids."""
+    alias_map = {}
+    for landuse_id, label, aliases in dictionary:
+        alias_map[_normalize_landuse_label(label)] = landuse_id
+        for alias in aliases:
+            key = _normalize_landuse_label(alias)
+            if key:
+                alias_map[key] = landuse_id
+    return alias_map
+
+
+def _fetch_kesmis_landuse_dictionary(url, token):
+    """Load active land-use types from KeSMIS, or None when unavailable."""
+    if not url or not token:
+        return None
+    try:
+        response = requests.get(
+            f"{url.rstrip('/')}/api/v1/landuse-types",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "x-access-token": token,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        body = response.json() if response.content else {}
+        rows = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return None
+        dictionary = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            landuse_id = row.get("id")
+            label = str(row.get("label") or row.get("use") or "").strip()
+            if landuse_id is None or not label:
+                continue
+            aliases = [
+                part.strip()
+                for part in str(row.get("aliases") or "").split(",")
+                if part.strip()
+            ]
+            dictionary.append((int(landuse_id), label, aliases))
+        return dictionary or None
+    except Exception:
+        return None
+
+
+def _row_field_value(row, field_name):
+    index = getattr(row, "index", None)
+    if index is None:
+        return None
+    target = field_name.lower()
+    for key in index:
+        if str(key).lower() == target:
+            return row[key]
+    return None
+
+
+class ParcelLanduseMatchDialog(QDialog):
+    """Let the user match parcel land-use values to the KeSMIS dictionary."""
+
+    def __init__(self, parent, rows, dictionary=None):
+        super().__init__(parent)
+        configure_qgis_dialog(self, parent)
+        self.setWindowTitle("Match Parcel Land Use")
+        resize_dialog_to_screen(self, min_width=640, min_height=360, max_width=860, max_height=640)
+        dictionary = dictionary or [
+            (landuse_id, label, ())
+            for landuse_id, label in _PARCEL_LANDUSE_DICTIONARY
+        ]
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "These values are in the parcel layer and are not KeSMIS land-use ids. "
+            "Match each one to the dictionary, or leave it blank. "
+            "A name is suggested only when it matches the dictionary exactly."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.table = QTableWidget(len(rows), 3)
+        self.table.setHorizontalHeaderLabels(["Value in layer", "Features", "Dictionary land use"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.NoSelection)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+
+        self._combos = []
+        self._values = []
+        for row_index, (value, count, suggested_id) in enumerate(rows):
+            self._values.append(value)
+            value_item = QTableWidgetItem(value)
+            value_item.setFlags(Qt.ItemIsEnabled)
+            count_item = QTableWidgetItem(str(count))
+            count_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            count_item.setFlags(Qt.ItemIsEnabled)
+            self.table.setItem(row_index, 0, value_item)
+            self.table.setItem(row_index, 1, count_item)
+
+            combo = QComboBox()
+            combo.addItem("Select land use…", "unset")
+            combo.addItem("Leave blank", "blank")
+            for landuse_id, label, _aliases in dictionary:
+                combo.addItem(f"{landuse_id} — {label}", landuse_id)
+            if suggested_id is not None:
+                match_index = combo.findData(suggested_id)
+                if match_index >= 0:
+                    combo.setCurrentIndex(match_index)
+            combo.currentIndexChanged.connect(
+                lambda _index, row=row_index, box=combo: self._style_landuse_row(row, box)
+            )
+            self.table.setCellWidget(row_index, 2, combo)
+            self._combos.append(combo)
+            self._style_landuse_row(row_index, combo)
+
+        self.table.resizeRowsToContents()
+        layout.addWidget(self.table)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept_if_complete)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _style_landuse_row(self, row_index, combo):
+        """Keep unmatched rows red until the user picks a land use or leaves it blank."""
+        unset = combo.currentData() == "unset"
+        if unset:
+            foreground = QBrush(QColor("#9b1c1c"))
+            background = QBrush(QColor("#fde8e8"))
+            combo.setStyleSheet(
+                "QComboBox { color: #9b1c1c; font-weight: 600; background-color: #fde8e8; }"
+                "QComboBox QAbstractItemView { color: #1a1a1a; background-color: white; font-weight: normal; }"
+            )
+        else:
+            foreground = QBrush(QColor("#1a1a1a"))
+            background = QBrush(QColor("#ffffff"))
+            combo.setStyleSheet("")
+        for column in (0, 1):
+            item = self.table.item(row_index, column)
+            if item is None:
+                continue
+            item.setForeground(foreground)
+            item.setBackground(background)
+
+    def _accept_if_complete(self):
+        pending = []
+        for value, combo in zip(self._values, self._combos):
+            if combo.currentData() == "unset":
+                pending.append(value)
+        if pending:
+            preview = ", ".join(pending[:8])
+            if len(pending) > 8:
+                preview += f", and {len(pending) - 8} more"
+            QMessageBox.warning(
+                self,
+                "Land use not matched",
+                "Choose a dictionary land use or Leave blank for every value:\n\n" + preview,
+            )
+            return
+        self.accept()
+
+    def mapping(self):
+        """Return layer value -> landuse id, or None when the user left it blank."""
+        result = {}
+        for value, combo in zip(self._values, self._combos):
+            chosen = combo.currentData()
+            result[value] = None if chosen == "blank" else int(chosen)
+        return result
 
 def add_geojson_to_map(filepath, layer_name):
     """
@@ -823,14 +1135,6 @@ class Worker(QObject):
                                 self.progress.emit(min(progress, 100))  # up to 100% for pcode
 
             # ── FINALIZE ─────────────────────────────────────────────────
-            if pcode_entity_data:
-                self.log.emit(
-                    f"Data fetched successfully for {len(valid_feature_indices)} rows "
-                    f"with parent entity '{self.parent_entity_name}'."
-                )
-            else:
-                self.log.emit(f"No data fetched for parent entity '{self.parent_entity_name}'.")
-
             self.result.emit(pcode_entity_data, valid_feature_indices)
             self.finished.emit()
 
@@ -860,8 +1164,14 @@ class FieldMatchingWorker(QObject):
     def run(self):
         """Perform field matching in the background, picking the best match per API field."""
         try:
-            layer_fields    = [f.name() for f in self.layer.fields()]
-            fields_to_match = layer_fields + self.pcode_fields
+            layer_fields = [f.name() for f in self.layer.fields()]
+            layer_field_names = set(layer_fields)
+            # Parent id columns are only added when the layer does not already
+            # have them, so a real County / Sub County / Ward column can win.
+            fallback_fields = [
+                name for name in self.pcode_fields if name not in layer_field_names
+            ]
+            fields_to_match = layer_fields + fallback_fields
             api_fields      = [attr["name"] for attr in self.entity.get("attributes", [])]
             field_mapping   = {}
             table_data      = []
@@ -899,8 +1209,12 @@ class FieldMatchingWorker(QObject):
 
             for api_field, layer_list in reverse_map.items():
                 if len(layer_list) > 1:
-                    # sort by descending score, keep the top one
-                    sorted_layers = sorted(layer_list, key=lambda lf: scores[lf], reverse=True)
+                    # A column on the layer beats an injected parent-id row.
+                    sorted_layers = sorted(
+                        layer_list,
+                        key=lambda lf: (lf in layer_field_names, scores[lf]),
+                        reverse=True,
+                    )
                     for duplicate in sorted_layers[1:]:
                         field_mapping[duplicate] = None
                         # clear its entry in table_data
@@ -1223,27 +1537,10 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         connection_box.setLayout(connection_layout)
         main_layout.addWidget(connection_box)
 
-        # Layer and Parent Selection
-        layer_box = QGroupBox("Layer and Parent Selection")
+        # Import is the main task. Settlement sync stays collapsed because
+        # most settlements are already on the server.
+        layer_box = QGroupBox("Import")
         layer_layout = QVBoxLayout()
-
-        settlement_layout = QHBoxLayout()
-        self.settlement_layer_combo = QComboBox()
-        self.settlement_layer_combo.setEnabled(False)
-        self.settlement_layer_combo.currentTextChanged.connect(self._update_code_guidance)
-        self.sync_settlement_codes_button = QPushButton("Sync Settlements with KeSMIS")
-        self.sync_settlement_codes_button.clicked.connect(self.sync_settlement_codes_for_selection)
-        self.sync_settlement_codes_button.setEnabled(False)
-        self.sync_settlement_codes_button.setToolTip(
-            "Match the settlement layer to KeSMIS by geometry, map fields, then create or update records on the server."
-        )
-        settlement_layout.addWidget(QLabel("Select Settlement Layer:"))
-        settlement_layout.addWidget(self.settlement_layer_combo, 1)
-        settlement_layout.addWidget(self.sync_settlement_codes_button)
-
-        self.code_guidance_label = QLabel("")
-        self.code_guidance_label.setWordWrap(True)
-        self.code_guidance_label.setStyleSheet("color: #8a4b00;")
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
@@ -1265,14 +1562,24 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.layer_combo.currentTextChanged.connect(self.reset_data)
         self.layer_combo.currentTextChanged.connect(self._update_code_guidance)
         layer_selection_layout.addWidget(QLabel("Select Layer:"))
-        layer_selection_layout.addWidget(self.layer_combo)
+        layer_selection_layout.addWidget(self.layer_combo, 1)
         parent_selection_layout = QHBoxLayout()
         self.parent_combo = QComboBox()
         self.parent_combo.addItems(["", "settlement", "ward"])
+        self.parent_combo.blockSignals(True)
+        self.parent_combo.setCurrentText("settlement")
+        self.parent_combo.blockSignals(False)
         self.parent_combo.setEnabled(False)
+        self.parent_combo.setToolTip(
+            "Match each feature to a settlement or ward that is already in KeSMIS."
+        )
         self.parent_combo.currentTextChanged.connect(self.start_fetch_pcode_data)
-        parent_selection_layout.addWidget(QLabel("Select Parent Entity:"))
+        parent_selection_layout.addWidget(QLabel("Parent:"))
         parent_selection_layout.addWidget(self.parent_combo)
+        self.match_status_label = QLabel("")
+        self.match_status_label.setWordWrap(True)
+        self.match_status_label.setVisible(False)
+        self.match_status_label.setStyleSheet("color: #8a4b00;")
         entity_selection_layout = QHBoxLayout()
         self.entity_combo = SearchableComboBox()
         self.entity_combo.setEnabled(False)
@@ -1280,12 +1587,55 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.entity_combo.setPlaceholderText("Search entities...")
         entity_selection_layout.addWidget(QLabel("Select Entity:"))
         entity_selection_layout.addWidget(self.entity_combo)
-        layer_layout.addLayout(settlement_layout)
-        layer_layout.addWidget(self.code_guidance_label)
-        layer_layout.addWidget(self.progress_bar)
         layer_layout.addLayout(layer_selection_layout)
         layer_layout.addLayout(parent_selection_layout)
+        layer_layout.addWidget(self.match_status_label)
         layer_layout.addLayout(entity_selection_layout)
+        layer_layout.addWidget(self.progress_bar)
+
+        settlement_box = QGroupBox("Update/Upload settlements")
+        settlement_box.setCheckable(True)
+        settlement_box.setChecked(False)
+        settlement_box.setToolTip(
+            "Open only when you need to add or update settlement records. "
+            "Imported layers are matched to settlements already in KeSMIS."
+        )
+        settlement_outer = QVBoxLayout()
+        self.settlement_sync_body = QWidget()
+        settlement_body_layout = QVBoxLayout(self.settlement_sync_body)
+        settlement_body_layout.setContentsMargins(0, 0, 0, 0)
+        settlement_note = QLabel(
+            "Use this when a settlement is not already in KeSMIS. "
+            "Parcel and facility imports do not need it."
+        )
+        settlement_note.setWordWrap(True)
+        settlement_body_layout.addWidget(settlement_note)
+
+        settlement_layout = QHBoxLayout()
+        self.settlement_layer_combo = QComboBox()
+        self.settlement_layer_combo.setEnabled(False)
+        self.settlement_layer_combo.currentTextChanged.connect(self._update_code_guidance)
+        self.sync_settlement_codes_button = QPushButton("Sync Settlements with KeSMIS")
+        self.sync_settlement_codes_button.clicked.connect(self.sync_settlement_codes_for_selection)
+        self.sync_settlement_codes_button.setEnabled(False)
+        self.sync_settlement_codes_button.setToolTip(
+            "Match the settlement layer to KeSMIS by geometry, map fields, then create or update records on the server."
+        )
+        settlement_layout.addWidget(QLabel("Settlement layer:"))
+        settlement_layout.addWidget(self.settlement_layer_combo, 1)
+        settlement_layout.addWidget(self.sync_settlement_codes_button)
+        settlement_body_layout.addLayout(settlement_layout)
+
+        self.code_guidance_label = QLabel("")
+        self.code_guidance_label.setWordWrap(True)
+        self.code_guidance_label.setStyleSheet("color: #8a4b00;")
+        settlement_body_layout.addWidget(self.code_guidance_label)
+        self.settlement_sync_body.setVisible(False)
+        settlement_box.toggled.connect(self.settlement_sync_body.setVisible)
+        settlement_outer.addWidget(self.settlement_sync_body)
+        settlement_box.setLayout(settlement_outer)
+        layer_layout.addWidget(settlement_box)
+
         layer_box.setLayout(layer_layout)
         layer_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         main_layout.addWidget(layer_box)
@@ -1365,6 +1715,15 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         work_layout.setContentsMargins(0, 0, 0, 0)
         work_layout.addWidget(scroll_area)
 
+        footer = QHBoxLayout()
+        footer.setContentsMargins(8, 0, 8, 8)
+        footer.addStretch()
+        self.close_button = QPushButton("Close")
+        self.close_button.setToolTip("Close this dialog without signing out")
+        self.close_button.clicked.connect(self.close)
+        footer.addWidget(self.close_button)
+        work_layout.addLayout(footer)
+
         self._attach_collapsible_help(work_panel, self._help_html(), add_toggle_row=False)
         log_actions.addWidget(self.toggle_help_button)
 
@@ -1403,15 +1762,18 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         <h4>Quick start</h4>
         <ol>
             <li><b>Server login</b> &mdash; enter the KeSMIS URL, username, and password when prompted.</li>
-            <li><b>Settlement sync</b> &mdash; choose the settlement layer, click <b>Sync Settlements with KeSMIS</b>, review field mapping and geometry matches, then create or update records on the server.</li>
-            <li><b>Select Layer</b> &mdash; choose the QGIS vector layer to export.</li>
-            <li><b>Parent entity</b> &mdash; pick <code>settlement</code> or <code>ward</code> for spatial matching.</li>
+            <li><b>Select Layer</b> &mdash; choose the parcels, facilities, or other vector layer to import.</li>
+            <li><b>Parent</b> &mdash; leave this on <code>settlement</code> so each feature is matched to a settlement already in KeSMIS. Use <code>ward</code> only when the layer has no settlement parent. Features that do not overlap a parent, and have no usable pcode, are left out. The dialog reports how many will be uploaded before you submit.</li>
             <li><b>Select Entity</b> &mdash; choose the API entity/model to submit to.</li>
             <li>Review <b>Field Mapping</b>, then click <b>Submit Data to KeSMIS</b>.</li>
         </ol>
 
+        <h4>Update/Upload settlements</h4>
+        <p>Open <b>Update/Upload settlements</b> only when a settlement is missing from KeSMIS or its record needs to change. Choose the settlement layer and click <b>Sync Settlements with KeSMIS</b>.</p>
+
         <h4>Field mapping</h4>
         <p>Layer fields are matched to API fields automatically. Use the filter box to search mappings and adjust API field selections in the table.</p>
+        <p><b>Parcels:</b> if the layer stores land-use names instead of ids, a matching dialog opens before submit. Match each value to the KeSMIS dictionary, or leave it blank. Names that do not match the dictionary are not assigned automatically.</p>
 
         <h4>Dry run</h4>
         <p>Enable <b>Dry Run</b> to validate a limited number of records on the server. Nothing is saved until you run a full submission.</p>
@@ -1723,20 +2085,13 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 )
             self.sync_settlement_codes_button.setEnabled(bool(self.token))
         elif settlement_layers:
-            layer_names = ", ".join(layer.name() for layer in settlement_layers)
             self.code_guidance_label.setText(
-                _join_ui_text(
-                    "Settlement layer(s) detected: ",
-                    layer_names,
-                    ". Select a settlement layer from the dropdown above, then click "
-                    "Sync Settlements with KeSMIS.",
-                )
+                "Choose the settlement layer, then click Sync Settlements with KeSMIS."
             )
             self.sync_settlement_codes_button.setEnabled(False)
         else:
             self.code_guidance_label.setText(
-                "Select a layer to import. A code field is required; you will be prompted "
-                "to generate codes if the selected layer does not have one."
+                "No settlement layer is loaded in this project."
             )
             self.sync_settlement_codes_button.setEnabled(False)
 
@@ -1864,7 +2219,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
     def _generate_settlement_short_code(self, existing_codes):
         while True:
-            code = shortuuid.uuid()[:8]
+            code = uuid.uuid4().hex[:8]
             if code not in existing_codes:
                 existing_codes.add(code)
                 return code
@@ -2346,6 +2701,37 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             features.append(filtered)
         return features
 
+    def _import_batch_fields(self, label):
+        """Fields that group one submit into a single KeSMIS import."""
+        return {
+            "importBatchId": str(uuid.uuid4()),
+            "importSource": "qgis-connector",
+            "importLabel": label,
+        }
+
+    def _post_import_upsert(self, url, payload, headers):
+        """POST one import batch, retrying on read timeouts."""
+        last_error = None
+        attempts = IMPORT_UPSERT_RETRIES + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return requests.post(
+                    f"{url}/api/v1/data/import/upsert",
+                    json=payload,
+                    headers=headers,
+                    timeout=IMPORT_UPSERT_TIMEOUT_SECONDS,
+                )
+            except (requests.Timeout, requests.ConnectionError) as error:
+                last_error = error
+                if attempt >= attempts:
+                    break
+                self.log_message(
+                    f"Import request timed out or dropped "
+                    f"(attempt {attempt}/{attempts}); retrying…"
+                )
+                QApplication.processEvents()
+        raise last_error
+
     def _submit_upsert_batches(
         self,
         model,
@@ -2355,6 +2741,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         progress_start=0,
         progress_end=100,
         manage_visibility=True,
+        batch_fields=None,
     ):
         """Submit features to KeSMIS import/upsert in batches."""
         if not features:
@@ -2399,12 +2786,9 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 payload = {"model": model, "data": batch}
                 if dry_run:
                     payload["dryRun"] = True
-                resp = requests.post(
-                    f"{url}/api/v1/data/import/upsert",
-                    json=payload,
-                    headers=headers,
-                    timeout=60,
-                )
+                elif batch_fields:
+                    payload.update(batch_fields)
+                resp = self._post_import_upsert(url, payload, headers)
                 resp.raise_for_status()
                 data = resp.json()
                 all_inserted += data.get("insertedCount", 0)
@@ -2672,6 +3056,7 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 progress_start=85,
                 progress_end=98,
                 manage_visibility=False,
+                batch_fields=None if is_dry_run else self._import_batch_fields(layer_name),
             )
 
             if is_dry_run:
@@ -2715,7 +3100,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 f"Local codes replaced: {local_updated}\n"
                 f"Local codes unchanged: {unchanged}\n"
                 f"New local codes (created): {generated}\n\n"
-                f"Synced features are marked in the '{self.SETTLEMENT_SYNC_FIELD}' field."
+                f"Synced features are marked in the '{self.SETTLEMENT_SYNC_FIELD}' field.\n\n"
+                f"{IMPORT_HISTORY_HINT}"
             )
             self.log_message(summary.replace("\n", " "))
             if errors:
@@ -2811,6 +3197,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         self.field_mapping = {}
         self.mapping_table.setRowCount(0)
         self.submit_button.setEnabled(False)
+        self._clear_match_status()
+        self.update_submit_button_text()
 
         layer = self.layer_combo.currentData()
         if layer:
@@ -2947,6 +3335,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         self.pcode_entity_data = {}
         self.valid_feature_indices = []
+        self._clear_match_status()
+        self.update_submit_button_text()
         if source_choice == "local":
             self.log_message(
                 f"Starting pcode data fetch for parent entity '{parent_entity}' "
@@ -2987,10 +3377,97 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
         """Handle results from background worker."""
         self.pcode_entity_data = pcode_entity_data
         self.valid_feature_indices = valid_feature_indices
-        if not pcode_entity_data:
-            self.submit_button.setEnabled(False)
+        self.submit_button.setEnabled(bool(pcode_entity_data))
+        self._report_parent_match()
+
+    def _clear_match_status(self):
+        """Hide the parent-match summary until a new match finishes."""
+        self.match_status_label.clear()
+        self.match_status_label.setVisible(False)
+
+    def _parent_match_name(self):
+        parent = (self.parent_combo.currentText() or "settlement").strip().lower()
+        if parent not in ("settlement", "ward"):
+            return "settlement"
+        return parent
+
+    def _feature_match_label(self, idx):
+        """Name a left-out feature by code, then pcode, then its row index."""
+        if self.gdf is None or idx not in self.gdf.index:
+            return f"feature {idx}"
+        row = self.gdf.loc[idx]
+        columns = row.index if hasattr(row, "index") else []
+        for key in ("code", "pcode"):
+            if key not in columns:
+                continue
+            value = self._convert_to_serializable(row[key])
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text and text.lower() != "nan":
+                return text
+        return f"feature {idx}"
+
+    def _report_parent_match(self):
+        """Tell the user how many features matched a parent and which were left out."""
+        if self.gdf is None or self.gdf.empty:
+            self._clear_match_status()
+            self.update_submit_button_text()
+            return
+
+        parent = self._parent_match_name()
+        matched_set = {idx for idx in self.valid_feature_indices if idx in self.gdf.index}
+        total = len(self.gdf)
+        matched = len(matched_set)
+        left_out_indices = [idx for idx in self.gdf.index if idx not in matched_set]
+        left_out = len(left_out_indices)
+        self.update_submit_button_text()
+
+        if left_out == 0:
+            self._clear_match_status()
+            self.log_message(f"{matched} of {total} features matched a {parent}.")
+            return
+
+        next_step = (
+            f"Check that those features overlap a {parent} boundary, "
+            "or add the missing settlement under Update/Upload settlements, then match again."
+            if parent == "settlement"
+            else f"Check that those features overlap a {parent} boundary, then match again."
+        )
+        if matched == 0:
+            summary = (
+                f"0 of {total} features matched a {parent}.\n\n"
+                f"None overlap a KeSMIS {parent} or have a usable pcode, "
+                "so nothing will be uploaded.\n\n"
+                f"{next_step}"
+            )
+            self.match_status_label.setText(
+                f"No features matched a {parent}. Nothing will be uploaded."
+            )
+            title = "No features matched"
         else:
-            self.submit_button.setEnabled(True)
+            summary = (
+                f"{matched} of {total} features matched a {parent} and can be uploaded.\n\n"
+                f"{left_out} do not overlap any KeSMIS {parent} and have no usable pcode, "
+                "so they will be left out.\n\n"
+                f"{next_step}"
+            )
+            self.match_status_label.setText(
+                f"{matched} of {total} matched a {parent}. {left_out} will not be uploaded."
+            )
+            title = "Some features will be left out"
+        self.match_status_label.setVisible(True)
+
+        cap = 12
+        labels = [self._feature_match_label(idx) for idx in left_out_indices[:cap]]
+        extra = left_out - len(labels)
+        listed = ", ".join(labels)
+        if extra:
+            listed += f", and {extra} more"
+        self.log_message(
+            f"{matched} of {total} features matched a {parent}. Left out: {listed}."
+        )
+        QMessageBox.warning(self, title, summary)
 
     def on_worker_finished(self):
         """Clean up after worker finishes."""
@@ -3208,6 +3685,116 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             lines.append(f"... and {len(errors) - limit} more error(s)")
         return lines
 
+    def _parcel_landuse_source_field(self):
+        """Return the layer column that holds parcel land use, if one exists."""
+        for layer_field, api_field in self.field_mapping.items():
+            if api_field and str(api_field).lower() == "landuse_id":
+                if layer_field in self.gdf.columns:
+                    return layer_field
+        for name in _PARCEL_LANDUSE_NAME_FIELDS:
+            for column in self.gdf.columns:
+                if str(column).lower() == name:
+                    return column
+        return None
+
+    def _parcel_landuse_dictionary(self):
+        """Active KeSMIS land-use types, with a built-in fallback."""
+        fetched = _fetch_kesmis_landuse_dictionary(self.server_url, self.token)
+        if fetched:
+            self.log_message(
+                f"Loaded {len(fetched)} land-use type(s) from KeSMIS."
+            )
+            return fetched
+        self.log_message(
+            "Could not load land-use types from KeSMIS; using the built-in list."
+        )
+        return [
+            (landuse_id, label, ())
+            for landuse_id, label in _PARCEL_LANDUSE_DICTIONARY
+        ]
+
+    def _confirm_parcel_landuse_mapping(self):
+        """Ask the user to match layer land-use names to the dictionary.
+
+        Returns a value->id map, or None when the user cancels.
+        An empty map means every value is already a dictionary id or blank.
+        """
+        source_field = self._parcel_landuse_source_field()
+        if source_field is None:
+            self.log_message(
+                "No land-use field found on this parcel layer. landuse_id will be left empty."
+            )
+            return {}
+
+        dictionary = self._parcel_landuse_dictionary()
+        self._parcel_landuse_ids = {landuse_id for landuse_id, _label, _aliases in dictionary}
+        alias_map = _build_landuse_alias_map(dictionary)
+
+        counts = {}
+        order = []
+        for idx, row in self.gdf.iterrows():
+            if idx not in self.valid_feature_indices:
+                continue
+            text = _landuse_display_value(self._convert_to_serializable(row[source_field]))
+            if text is None:
+                continue
+            coded = _numeric_landuse_id(text)
+            if coded in self._parcel_landuse_ids:
+                continue
+            if text not in counts:
+                order.append(text)
+                counts[text] = 0
+            counts[text] += 1
+
+        if not order:
+            self.log_message(
+                f"Parcel land use in '{source_field}' is already coded. No matching needed."
+            )
+            return {}
+
+        rows = [
+            (value, counts[value], _suggested_landuse_id(value, alias_map))
+            for value in order
+        ]
+        dialog = ParcelLanduseMatchDialog(self, rows, dictionary=dictionary)
+        if dialog.exec_() != QDialog.Accepted:
+            self.log_message("Parcel land-use matching cancelled. Nothing was submitted.")
+            return None
+
+        mapping = dialog.mapping()
+        matched = sum(1 for landuse_id in mapping.values() if landuse_id is not None)
+        blank = len(mapping) - matched
+        self.log_message(
+            f"Parcel land use: matched {matched} value(s) from '{source_field}', "
+            f"left {blank} blank."
+        )
+        return mapping
+
+    def _apply_parcel_landuse(self, feature, row, source_field, mapping):
+        raw = None
+        if source_field is not None:
+            raw = self._convert_to_serializable(row[source_field])
+        elif "landuse_id" in feature:
+            raw = feature.get("landuse_id")
+        text = _landuse_display_value(raw)
+        if text is None:
+            feature.pop("landuse_id", None)
+            return "blank"
+        if text in mapping:
+            landuse_id = mapping[text]
+            if landuse_id is None:
+                feature.pop("landuse_id", None)
+                return "blank"
+            feature["landuse_id"] = landuse_id
+            return "matched"
+        coded = _numeric_landuse_id(text)
+        valid_ids = getattr(self, "_parcel_landuse_ids", None) or _PARCEL_LANDUSE_IDS
+        if coded in valid_ids:
+            feature["landuse_id"] = coded
+            return "coded"
+        feature.pop("landuse_id", None)
+        return "blank"
+
     def submit_features(self):
         """Submit features to API in batches of 100 with progress updates."""
         try:
@@ -3223,7 +3810,20 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
             # Disable UI and prepare progress bar
             self.submit_button.setEnabled(False)
+
+            features = []
+            is_parcel = str(entity.get("model", "")).lower() == "parcel"
+            landuse_source_field = None
+            landuse_mapping = {}
+            landuse_counts = {"matched": 0, "coded": 0, "blank": 0}
+            if is_parcel:
+                landuse_mapping = self._confirm_parcel_landuse_mapping()
+                if landuse_mapping is None:
+                    return
+                landuse_source_field = self._parcel_landuse_source_field()
+
             # Process CRS and geometries
+            self._show_import_wait("Please wait. Preparing the layer for import…")
             try:
                 srid = layer.crs().postgisSrid()
                 if self.gdf.crs is None:
@@ -3234,14 +3834,15 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 self.log_message("Z dimension dropped and GeoDataFrame reprojected to EPSG:4326.")
             except Exception as e:
                 self.log_message(f"Error reprojecting or processing geometries: {e}")
+                self._hide_import_wait()
                 QMessageBox.critical(self, "Geometry Error", f"Failed to reproject or process geometries: {e}")
                 return
 
             # Build feature payloads
-            features = []
+            skipped = 0
             for idx, row in self.gdf.iterrows():
                 if idx not in self.valid_feature_indices:
-                    self.log_message(f"Skipping feature index {idx}: No valid parent ID found.")
+                    skipped += 1
                     continue
 
                 feature = {}
@@ -3270,10 +3871,30 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                     feature["geom"] = row.geometry.__geo_interface__
                 # Add isApproved property
                 feature["isApproved"] = True
+                if is_parcel:
+                    outcome = self._apply_parcel_landuse(
+                        feature, row, landuse_source_field, landuse_mapping
+                    )
+                    landuse_counts[outcome] = landuse_counts.get(outcome, 0) + 1
                 features.append(feature)
+
+            if is_parcel and features:
+                self.log_message(
+                    "Parcel land use on features to submit: "
+                    f"{landuse_counts['matched']} matched, "
+                    f"{landuse_counts['coded']} already coded, "
+                    f"{landuse_counts['blank']} blank."
+                )
+
+            if skipped and features:
+                self.log_message(
+                    f"Submitting {len(features)} feature(s). "
+                    f"{skipped} left out because they do not match a {self._parent_match_name()}."
+                )
 
             if not features:
                 self.log_message("No features with valid parent IDs to submit.")
+                self._hide_import_wait()
                 QMessageBox.warning(self, "No Valid Features", "No features with valid parent IDs were found for submission.")
                 return
 
@@ -3292,9 +3913,16 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             # Batch submission setup
             batch_size = 100
             total = len(features)
+            batch_count = (total + batch_size - 1) // batch_size
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
             self.progress_bar.setVisible(True)
+            wait_action = "Validating on KeSMIS" if is_dry_run else "Importing to KeSMIS"
+            self._show_import_wait(
+                f"Please wait. {wait_action}…",
+                value=0,
+                maximum=batch_count,
+            )
 
             headers = {
                 "Authorization": f"Bearer {self.token}",
@@ -3302,6 +3930,9 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
             }
             all_inserted = all_updated = all_failed = 0
             all_errors = []
+            # One id for every request of this submit, so KeSMIS records it as
+            # a single import that can be reviewed and undone.
+            batch_fields = None if is_dry_run else self._import_batch_fields(layer.name())
 
             # Submit in batches
             for start in range(0, total, batch_size):
@@ -3309,22 +3940,33 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 batch_num = start // batch_size + 1
                 action = "Validating batch" if is_dry_run else "Submitting batch"
                 self.log_message(f"{action} {batch_num} ({start+1}–{min(start+batch_size, total)} of {total})…")
+                self._show_import_wait(
+                    f"Please wait. {wait_action}.\n"
+                    f"Batch {batch_num} of {batch_count} "
+                    f"({start + 1}–{min(start + batch_size, total)} of {total}).",
+                    value=batch_num - 1,
+                    maximum=batch_count,
+                )
                 try:
                     payload = {"model": entity["model"], "data": batch}
                     if is_dry_run:
                         payload["dryRun"] = True
-                    resp = requests.post(
-                        f"{url}/api/v1/data/import/upsert",
-                        json=payload,
-                        headers=headers,
-                        timeout=30
-                    )
+                    else:
+                        payload.update(batch_fields)
+                    resp = self._post_import_upsert(url, payload, headers)
                     resp.raise_for_status()
                     data = resp.json()
                     all_inserted += data.get("insertedCount", 0)
                     all_updated += data.get("updatedCount", 0)
                     all_failed += data.get("failedCount", 0)
                     all_errors.extend(data.get("errors", []))
+                except requests.Timeout as e:
+                    self.log_message(
+                        f"Batch {batch_num} timed out after "
+                        f"{IMPORT_UPSERT_TIMEOUT_SECONDS}s "
+                        f"({IMPORT_UPSERT_RETRIES + 1} attempt(s)): {e}"
+                    )
+                    all_failed += len(batch)
                 except Exception as e:
                     self.log_message(f"Batch {batch_num} failed entirely: {e}")
                     all_failed += len(batch)
@@ -3332,10 +3974,17 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 # Update progress
                 percent = int((start + len(batch)) / total * 100)
                 self.progress_bar.setValue(percent)
+                self._show_import_wait(
+                    f"Please wait. {wait_action}.\n"
+                    f"Finished batch {batch_num} of {batch_count}.",
+                    value=batch_num,
+                    maximum=batch_count,
+                )
 
             # Finalize
             self.progress_bar.setValue(100)
             self.progress_bar.setVisible(False)
+            self._hide_import_wait()
 
             if is_dry_run:
                 summary = (
@@ -3347,6 +3996,8 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
                 dialog_title = "Dry Run Complete"
             else:
                 summary = f"Done: {all_inserted} inserted, {all_updated} updated, {all_failed} failed."
+                if all_inserted or all_updated:
+                    summary += f"\n\n{IMPORT_HISTORY_HINT}"
                 dialog_title = "Import Complete"
 
             self.log_message(summary.replace("\n", " "))
@@ -3362,18 +4013,40 @@ class KesMISDialog(QDialog, CollapsibleHelpMixin):
 
         except Exception as e:
             self.log_message(f"Error submitting features: {e}")
+            self._hide_import_wait()
             QMessageBox.critical(self, "Error", str(e))
 
         finally:
+            self._hide_import_wait()
             self.submit_button.setEnabled(True)
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setVisible(False)
 
+    def _show_import_wait(self, message, value=None, maximum=None):
+        """Show the please-wait dialog and let it paint before more work runs."""
+        if getattr(self, "_import_wait_dialog", None) is None:
+            self._import_wait_dialog = ImportWaitDialog(self)
+        self._import_wait_dialog.update_status(message, value=value, maximum=maximum)
+
+    def _hide_import_wait(self):
+        dialog = getattr(self, "_import_wait_dialog", None)
+        if dialog is None:
+            return
+        dialog.hide()
+        dialog.deleteLater()
+        self._import_wait_dialog = None
+        QApplication.processEvents()
+
     def update_submit_button_text(self):
-        """Update submit button text based on dry run mode."""
+        """Update submit button text based on dry run mode and match coverage."""
         if self.dry_run_checkbox.isChecked():
             limit = self.dry_run_spinbox.value()
             self.submit_button.setText(f"Validate on KeSMIS (Dry Run: {limit} records)")
+            return
+        total = len(self.gdf) if self.gdf is not None else 0
+        matched = len({idx for idx in self.valid_feature_indices if self.gdf is not None and idx in self.gdf.index})
+        if total and 0 < matched < total:
+            self.submit_button.setText(f"Submit {matched} of {total} to KeSMIS")
         else:
             self.submit_button.setText("Submit Data to KeSMIS")
     
